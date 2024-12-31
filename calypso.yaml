@@ -103,6 +103,58 @@ ble_client:
 sensor:
   - platform: ble_client
     ble_client_id: calypso_wind_sensor
+    name: "Calypso Wind Speed"
+    service_uuid: "181A"
+    characteristic_uuid: "2A72"
+    type: characteristic  # Add this line to specify the type as characteristic
+    notify: True
+    on_notify: 
+      then:
+        - lambda: |-
+            if( isnan(x) ) {
+              ESP_LOGW("BLE on_notify", "Received NAN" );
+            }
+            // Assuming x is a pointer to the start of the 10-byte data buffer
+            const uint8_t* data = reinterpret_cast<const uint8_t*>(&x);
+            ESP_LOGW("BLE on_notify", "Received data is %d bytes", sizeof(x) );
+
+            // Combine the first two bytes into a 16-bit value
+            uint16_t wind_speed_raw = (data[1] << 8) | data[0];
+
+
+            // REF: https://github.com/decipherindustries/signalk-calypso-ultrasonic/blob/master/lib/calypso-ultrasonic.js
+            //      Look into the function decode()
+            
+            // Convert raw wind speed to float m/s, then to knots per hour
+            float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
+            ESP_LOGD("wind_sensor", "Received raw data: wind speed %u", wind_speed_raw);  // Log the received value
+            id(calypso_wind_speed).publish_state(wind_speed);  // Update the sensor state in Home Assistant
+
+  - platform: ble_client
+    ble_client_id: calypso_wind_sensor
+    name: "Calypso Wind Angle"
+    service_uuid: "181A"
+    characteristic_uuid: "2A73"
+    type: characteristic  # Add this line to specify the type as characteristic
+    notify: True
+    on_notify: 
+      then:
+        - lambda: |-
+            if( isnan(x) ) {
+              ESP_LOGW("BLE on_notify", "Received NAN" );
+            }
+            // Assuming x is a pointer to the start of the 10-byte data buffer
+            const uint8_t* data = reinterpret_cast<const uint8_t*>(&x);
+            ESP_LOGW("BLE on_notify", "Received data is %d bytes", sizeof(x) );
+
+            // Combine the first two bytes into a 16-bit value
+            uint16_t wind_angle_raw = (data[1] << 8) | data[0];
+            ESP_LOGD("wind_sensor", "Received raw data: wind angle %u", wind_angle_raw);  // Log the received value
+            float wind_angle = wind_angle_raw * 1.0;
+            id(calypso_wind_angle).publish_state(wind_angle);  // Update the sensor state in Home Assistant
+
+  - platform: ble_client
+    ble_client_id: calypso_wind_sensor
     name: "Calypso Wind Sensor"
     service_uuid: "180D"
     characteristic_uuid: "2A39"
