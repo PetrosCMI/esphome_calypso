@@ -1,0 +1,40 @@
+  - platform: ble_client
+    ble_client_id: calypso_wind_sensor
+    name: "Calypso Wind Sensor"
+#    service_uuid: "0000181A-0000-1000-8000-00805f9b34fb"
+#    characteristic_uuid: "00002A72-0000-1000-8000-00805f9b34fb"
+    service_uuid: "180D"
+    characteristic_uuid: "2A39"
+    type: characteristic  # Add this line to specify the type as characteristic
+    notify: True
+    on_notify: 
+      then:
+        - lambda: |-
+            if( isnan(x) ) {
+              ESP_LOGW("BLE on_notify", "Received NAN" );
+            }
+            // Assuming x is a pointer to the start of the 10-byte data buffer
+            const uint8_t* data = reinterpret_cast<const uint8_t*>(&x);
+            ESP_LOGW("BLE on_notify", "Received data is %d bytes", sizeof(x) );
+
+            // Combine the first two bytes into a 16-bit value
+            uint16_t wind_speed_raw = (data[1] << 8) | data[0];
+            int16_t wind_angle_raw = (data[3] << 8) | data[2];
+            int16_t compass_raw = (data[9] << 8) | data[8];
+
+
+            // REF: https://github.com/decipherindustries/signalk-calypso-ultrasonic/blob/master/lib/calypso-ultrasonic.js
+            //      Look into the function decode()
+            
+            // Convert raw wind speed to float m/s, then to knots per hour
+            float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
+            float wind_angle = wind_angle_raw * 1.0;
+            float compass = 360.0 - compass_raw;
+            ESP_LOGD("wind_sensor", "Received raw data: %u %d %d", wind_speed_raw, wind_angle_raw, compass_raw);  // Log the received value
+            id(calypso_wind_speed).publish_state(wind_speed);  // Update the sensor state in Home Assistant
+            id(calypso_wind_angle).publish_state(wind_angle);  // Update the sensor state in Home Assistant
+            id(calypso_compass_direction).publish_state(compass);  // Update the sensor state in Home Assistant
+            id(calypso_battery_level).publish_state( data[4] * 10.0 );
+            id(calypso_temperature).publish_state( data[5] - 100.0 );
+            id(calypso_roll).publish_state( data[6] - 90.0 );
+            id(calypso_pitch).publish_state( data[7] - 90.0 );
