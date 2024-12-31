@@ -1,8 +1,109 @@
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+    
+esphome:
+  name: esp32c3
+  friendly_name: ESP32C3
+  platformio_options: 
+    board_build.flash_mode: dio
+#    build_src_filter: +<custom_calypso/*>
+#    src_filter: +<custom_calypso/custom_ble_client.cpp>
+#  on_boot:
+#    priority: -100  # Set priority for initialization
+#    then:
+#      - lambda: |-
+#          auto *custom_ble_client = new CustomBLEClient();
+#          ESP_LOGI("CustomBLEClient", "Custom BLE Client initialized.");
+#          App.register_component(custom_ble_client);  // Register the component
+
+
+#external_components:
+#  - source: 
+#      type: local
+#      path: my_components
+
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "v3rXp9DWyPqyUEk8cZJcUkoXTajAOG1BuHYTMs1QCN4="
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Esp32C3 Fallback Hotspot"
+    password: !secret device_wifi_password
+
+substitutions:
+  calypso_update_interval: 1s
+
+captive_portal:
+
+esp32_ble_tracker:
+
+#  on_ble_advertise:
+#    then:
+#      - lambda: |-
+#          ESP_LOGD("BLE Scanner", "Device found: Address=%s RSSI=%d", x.address_str().c_str(), x.get_rssi());
+#          if (!x.get_name().empty()) {
+#            ESP_LOGD("BLE Scanner", "  Name: %s", x.get_name().c_str());
+#          }
+#          auto uuids = x.get_service_uuids();
+#          if (!uuids.empty()) {
+#            for (auto &uuid : uuids) {
+#              ESP_LOGD("BLE Scanner", "  Service UUID: %s", uuid.to_string().c_str());
+#            }
+#          }
+
+ble_client:
+  - mac_address: F1:99:0B:73:1F:BB
+    id: calypso_wind_sensor
+    on_passkey_request:
+      then:
+        - logger.log:
+            format: "Got on_passkey_request from BLE device"
+
+    on_connect:
+      then:
+        - lambda: |-
+            ESP_LOGW("BLE Client", "Connected to ULTRASONIC wind sensor.");
+
+            // REF:  https://github.com/stephpen/BLE_Wind/blob/main/BLE_Wind.ino
+            // Write value 0x01 to the characteristic with UUID 0xA003
+            auto *client = id(calypso_wind_sensor);
+            if (client->connected()) {
+              auto characteristic = client->get_characteristic(0x180D, 0xA003);
+              if (characteristic) {
+                uint8_t value = 0x01;
+                characteristic->write_value(&value, 1);
+                ESP_LOGI("BLE Client", "Wrote value 0x01 to characteristic A003");
+              } else {
+                ESP_LOGE("BLE Client", "Failed to find characteristic A003");
+              }
+            } else {
+              ESP_LOGE("BLE Client", "Failed to connect to BLE client");
+            }
+    on_disconnect:
+      then:
+        - lambda: |-
+            ESP_LOGW("BLE Client", "Disconnected from ULTRASONIC wind sensor.");
+
+sensor:
   - platform: ble_client
     ble_client_id: calypso_wind_sensor
     name: "Calypso Wind Sensor"
-#    service_uuid: "0000181A-0000-1000-8000-00805f9b34fb"
-#    characteristic_uuid: "00002A72-0000-1000-8000-00805f9b34fb"
     service_uuid: "180D"
     characteristic_uuid: "2A39"
     type: characteristic  # Add this line to specify the type as characteristic
@@ -38,3 +139,62 @@
             id(calypso_temperature).publish_state( data[5] - 100.0 );
             id(calypso_roll).publish_state( data[6] - 90.0 );
             id(calypso_pitch).publish_state( data[7] - 90.0 );
+
+  - platform: template
+    id: wind_speed_sensor
+    name: "Wind Speed"
+    unit_of_measurement: "m/s"
+    icon: "mdi:weather-windy"
+    accuracy_decimals: 2
+
+  - platform: template
+    id: calypso_roll
+    name: "Calypso Roll"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_pitch
+    name: "Calypso Pitch"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_battery_level
+    name: "Calypso Battery Level"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_temperature
+    name: "Calypso Temperature"
+    unit_of_measurement: "C"
+    accuracy_decimals: 1
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_wind_speed
+    name: "Calypso Wind Speed"
+    unit_of_measurement: "m/s"
+    accuracy_decimals: 2
+    icon: "mdi:weather-windy"
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_wind_angle
+    name: "Calypso Wind Angle"
+    unit_of_measurement: "°"
+    accuracy_decimals: 2
+    icon: "mdi:compass"
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_compass_direction
+    name: "Calypso Compass Direction"
+    unit_of_measurement: "°"
+    accuracy_decimals: 2
+    icon: "mdi:compass-outline"
+    update_interval: ${calypso_update_interval}
