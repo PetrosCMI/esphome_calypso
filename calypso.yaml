@@ -105,7 +105,7 @@ sensor:
     ble_client_id: calypso_wind_sensor
     name: "Calypso Wind Speed"
     service_uuid: "181A"
-    characteristic_uuid: "2A72"
+    characteristic_uuid: "2A72"      # FAIL [19:42:51][W][ble_sensor:048]: No sensor characteristic found at service 0x181A char 0x2A72
     type: characteristic  # Add this line to specify the type as characteristic
     notify: True
     on_notify: 
@@ -134,7 +134,7 @@ sensor:
     ble_client_id: calypso_wind_sensor
     name: "Calypso Wind Angle"
     service_uuid: "181A"
-    characteristic_uuid: "2A73"
+    characteristic_uuid: "2A73"    # FAIL [19:40:34][W][ble_sensor:048]: No sensor characteristic found at service 0x181A char 0x2A73
     type: characteristic  # Add this line to specify the type as characteristic
     notify: True
     on_notify: 
@@ -157,7 +157,8 @@ sensor:
     ble_client_id: calypso_wind_sensor
     name: "Calypso Wind Sensor"
     service_uuid: "180D"
-    characteristic_uuid: "2A39"
+    characteristic_uuid: "2A39"    # FAIL: [19:45:55][W][esp32_ble_client:402]: [0] [F1:99:0B:73:1F:BB] Cannot parse characteristic value of type 0x0 length 10
+    # This fails because esphome is trying to process a float: https://www.esphome.io/api/ble__client__base_8cpp_source
     type: characteristic  # Add this line to specify the type as characteristic
     notify: True
     on_notify: 
