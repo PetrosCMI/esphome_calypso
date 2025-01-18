@@ -1,29 +1,13 @@
+esphome:
+  name: calypso-ha
+  friendly_name: Calypso_HA
+  platformio_options: 
+    board_build.flash_mode: dio
+
 esp32:
   board: esp32-c3-devkitm-1
   framework:
     type: esp-idf
-    
-esphome:
-  name: esp32c3
-  friendly_name: ESP32C3
-  platformio_options: 
-    board_build.flash_mode: dio
-#    build_src_filter: +<custom_calypso/*>
-#    src_filter: +<custom_calypso/custom_ble_client.cpp>
-#  on_boot:
-#    priority: -100  # Set priority for initialization
-#    then:
-#      - lambda: |-
-#          auto *custom_ble_client = new CustomBLEClient();
-#          ESP_LOGI("CustomBLEClient", "Custom BLE Client initialized.");
-#          App.register_component(custom_ble_client);  // Register the component
-
-
-#external_components:
-#  - source: 
-#      type: local
-#      path: my_components
-
 
 # Enable logging
 logger:
@@ -31,7 +15,7 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "v3rXp9DWyPqyUEk8cZJcUkoXTajAOG1BuHYTMs1QCN4="
+    key: "7K/i1bi0MN/D2faPI1d6iekhbAYjgMcIl6ndOMtm85E="
 
 ota:
   - platform: esphome
@@ -43,7 +27,7 @@ wifi:
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
-    ssid: "Esp32C3 Fallback Hotspot"
+    ssid: "Calypso-Ha Fallback Hotspot"
     password: !secret device_wifi_password
 
 substitutions:
@@ -52,20 +36,6 @@ substitutions:
 captive_portal:
 
 esp32_ble_tracker:
-
-#  on_ble_advertise:
-#    then:
-#      - lambda: |-
-#          ESP_LOGD("BLE Scanner", "Device found: Address=%s RSSI=%d", x.address_str().c_str(), x.get_rssi());
-#          if (!x.get_name().empty()) {
-#            ESP_LOGD("BLE Scanner", "  Name: %s", x.get_name().c_str());
-#          }
-#          auto uuids = x.get_service_uuids();
-#          if (!uuids.empty()) {
-#            for (auto &uuid : uuids) {
-#              ESP_LOGD("BLE Scanner", "  Service UUID: %s", uuid.to_string().c_str());
-#            }
-#          }
 
 ble_client:
   - mac_address: F1:99:0B:73:1F:BB
@@ -81,20 +51,30 @@ ble_client:
             ESP_LOGW("BLE Client", "Connected to ULTRASONIC wind sensor.");
 
             // REF:  https://github.com/stephpen/BLE_Wind/blob/main/BLE_Wind.ino
-            // Write value 0x01 to the characteristic with UUID 0xA003
             auto *client = id(calypso_wind_sensor);
             if (client->connected()) {
+              // Write to characteristic 0xA003 - Data Fields
               auto characteristic = client->get_characteristic(0x180D, 0xA003);
               if (characteristic) {
-                uint8_t value = 0x01;
+                uint8_t value = 0x00;   // 0 reads just the basic data, 1 reads extended data but at heavy battery use
                 characteristic->write_value(&value, 1);
-                ESP_LOGI("BLE Client", "Wrote value 0x01 to characteristic A003");
+                ESP_LOGI("BLE Client", "Wrote value %02x to characteristic A003", value);
               } else {
                 ESP_LOGE("BLE Client", "Failed to find characteristic A003");
+              }
+              // Write to characteristic 0xA002 - Data Rate
+              auto characteristic_A002 = client->get_characteristic(0x180D, 0xA002);
+              if (characteristic_A002) {
+                uint8_t value_A002 = 0x01;    // 1hz updates for least power drain
+                characteristic_A002->write_value(&value_A002, 1);
+                ESP_LOGI("BLE Client", "Wrote value %02x to characteristic A002", value_A002);
+              } else {
+                ESP_LOGE("BLE Client", "Failed to find characteristic A002");
               }
             } else {
               ESP_LOGE("BLE Client", "Failed to connect to BLE client");
             }
+
     on_disconnect:
       then:
         - lambda: |-
@@ -103,115 +83,52 @@ ble_client:
 sensor:
   - platform: ble_client
     ble_client_id: calypso_wind_sensor
-    name: "Calypso Wind Speed"
-    service_uuid: "181A"
-    characteristic_uuid: "2A72"      # FAIL [19:42:51][W][ble_sensor:048]: No sensor characteristic found at service 0x181A char 0x2A72
-    type: characteristic  # Add this line to specify the type as characteristic
-    notify: True
-    on_notify: 
-      then:
-        - lambda: |-
-            if( isnan(x) ) {
-              ESP_LOGW("BLE on_notify", "Received NAN" );
-            }
-            // Assuming x is a pointer to the start of the 10-byte data buffer
-            const uint8_t* data = reinterpret_cast<const uint8_t*>(&x);
-            ESP_LOGW("BLE on_notify", "Received data is %d bytes", sizeof(x) );
-
-            // Combine the first two bytes into a 16-bit value
-            uint16_t wind_speed_raw = (data[1] << 8) | data[0];
-
-
-            // REF: https://github.com/decipherindustries/signalk-calypso-ultrasonic/blob/master/lib/calypso-ultrasonic.js
-            //      Look into the function decode()
-            
-            // Convert raw wind speed to float m/s, then to knots per hour
-            float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
-            ESP_LOGD("wind_sensor", "Received raw data: wind speed %u", wind_speed_raw);  // Log the received value
-            id(calypso_wind_speed).publish_state(wind_speed);  // Update the sensor state in Home Assistant
-
-  - platform: ble_client
-    ble_client_id: calypso_wind_sensor
-    name: "Calypso Wind Angle"
-    service_uuid: "181A"
-    characteristic_uuid: "2A73"    # FAIL [19:40:34][W][ble_sensor:048]: No sensor characteristic found at service 0x181A char 0x2A73
-    type: characteristic  # Add this line to specify the type as characteristic
-    notify: True
-    on_notify: 
-      then:
-        - lambda: |-
-            if( isnan(x) ) {
-              ESP_LOGW("BLE on_notify", "Received NAN" );
-            }
-            // Assuming x is a pointer to the start of the 10-byte data buffer
-            const uint8_t* data = reinterpret_cast<const uint8_t*>(&x);
-            ESP_LOGW("BLE on_notify", "Received data is %d bytes", sizeof(x) );
-
-            // Combine the first two bytes into a 16-bit value
-            uint16_t wind_angle_raw = (data[1] << 8) | data[0];
-            ESP_LOGD("wind_sensor", "Received raw data: wind angle %u", wind_angle_raw);  // Log the received value
-            float wind_angle = wind_angle_raw * 1.0;
-            id(calypso_wind_angle).publish_state(wind_angle);  // Update the sensor state in Home Assistant
-
-  - platform: ble_client
-    ble_client_id: calypso_wind_sensor
     name: "Calypso Wind Sensor"
     service_uuid: "180D"
-    characteristic_uuid: "2A39"    # FAIL: [19:45:55][W][esp32_ble_client:402]: [0] [F1:99:0B:73:1F:BB] Cannot parse characteristic value of type 0x0 length 10
+    characteristic_uuid: "2A39"
     # This fails because esphome is trying to process a float: https://www.esphome.io/api/ble__client__base_8cpp_source
+    # 
     type: characteristic  # Add this line to specify the type as characteristic
     notify: True
-    on_notify: 
-      then:
-        - lambda: |-
-            if( isnan(x) ) {
-              ESP_LOGW("BLE on_notify", "Received NAN" );
-            }
-            // Assuming x is a pointer to the start of the 10-byte data buffer
-            const uint8_t* data = reinterpret_cast<const uint8_t*>(&x);
-            ESP_LOGW("BLE on_notify", "Received data is %d bytes", sizeof(x) );
-
-            // Combine the first two bytes into a 16-bit value
-            uint16_t wind_speed_raw = (data[1] << 8) | data[0];
-            int16_t wind_angle_raw = (data[3] << 8) | data[2];
-            int16_t compass_raw = (data[9] << 8) | data[8];
-
-
-            // REF: https://github.com/decipherindustries/signalk-calypso-ultrasonic/blob/master/lib/calypso-ultrasonic.js
-            //      Look into the function decode()
-            
-            // Convert raw wind speed to float m/s, then to knots per hour
-            float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
-            float wind_angle = wind_angle_raw * 1.0;
-            float compass = 360.0 - compass_raw;
-            ESP_LOGD("wind_sensor", "Received raw data: %u %d %d", wind_speed_raw, wind_angle_raw, compass_raw);  // Log the received value
-            id(calypso_wind_speed).publish_state(wind_speed);  // Update the sensor state in Home Assistant
-            id(calypso_wind_angle).publish_state(wind_angle);  // Update the sensor state in Home Assistant
-            id(calypso_compass_direction).publish_state(compass);  // Update the sensor state in Home Assistant
-            id(calypso_battery_level).publish_state( data[4] * 10.0 );
-            id(calypso_temperature).publish_state( data[5] - 100.0 );
-            id(calypso_roll).publish_state( data[6] - 90.0 );
-            id(calypso_pitch).publish_state( data[7] - 90.0 );
+    lambda: |-
+      ESP_LOGW("BLE main", "Received data is %d bytes: %s", x.size(), format_hex_pretty(x).c_str());
+      //uint8_t d0 = x[0];
+      uint16_t speed_raw = x[0] | ( x[1] << 8 );
+      // Combine the first two bytes into a 16-bit value
+      uint16_t wind_speed_raw = (x[1] << 8) | x[0];
+      int16_t wind_angle_raw = (x[3] << 8) | x[2];
+      int16_t compass_raw = (x[9] << 8) | x[8];
+      // REF: https://github.com/decipherindustries/signalk-calypso-ultrasonic/blob/master/lib/calypso-ultrasonic.js
+      //      Look into the function decode()
+      
+      // Convert raw wind speed to float m/s, then to knots per hour
+      float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
+      float wind_angle = wind_angle_raw * 1.0;
+      float compass = 360.0 - compass_raw;
+      ESP_LOGD("wind_sensor", "Received raw data: %u %d %d", wind_speed_raw, wind_angle_raw, compass_raw);  // Log the received value
+      id(calypso_wind_speed).publish_state(wind_speed);  // Update the sensor state in Home Assistant
+      id(calypso_wind_angle).publish_state(wind_angle);  // Update the sensor state in Home Assistant
+      id(calypso_battery_level).publish_state( x[4] * 10.0 );
+      id(calypso_temperature).publish_state( x[5] - 100.0 );
+      //id(calypso_compass_direction).publish_state(compass);  // Update the sensor state in Home Assistant
+      //id(calypso_roll).publish_state( x[6] - 90.0 );
+      //id(calypso_pitch).publish_state( x[7] - 90.0 );
+      return(0);
 
   - platform: template
-    id: wind_speed_sensor
-    name: "Wind Speed"
-    unit_of_measurement: "m/s"
-    icon: "mdi:weather-windy"
+    id: calypso_wind_speed
+    name: "Calypso Wind Speed"
+    unit_of_measurement: "kts"
     accuracy_decimals: 2
-
-  - platform: template
-    id: calypso_roll
-    name: "Calypso Roll"
-    unit_of_measurement: "%"
-    accuracy_decimals: 1
+    icon: "mdi:weather-windy"
     update_interval: ${calypso_update_interval}
 
   - platform: template
-    id: calypso_pitch
-    name: "Calypso Pitch"
-    unit_of_measurement: "%"
-    accuracy_decimals: 1
+    id: calypso_wind_angle
+    name: "Calypso Wind Angle"
+    unit_of_measurement: "°"
+    accuracy_decimals: 2
+    icon: "mdi:compass"
     update_interval: ${calypso_update_interval}
 
   - platform: template
@@ -227,27 +144,4 @@ sensor:
     unit_of_measurement: "C"
     accuracy_decimals: 1
     update_interval: ${calypso_update_interval}
-
-  - platform: template
-    id: calypso_wind_speed
-    name: "Calypso Wind Speed"
-    unit_of_measurement: "m/s"
-    accuracy_decimals: 2
-    icon: "mdi:weather-windy"
-    update_interval: ${calypso_update_interval}
-
-  - platform: template
-    id: calypso_wind_angle
-    name: "Calypso Wind Angle"
-    unit_of_measurement: "°"
-    accuracy_decimals: 2
-    icon: "mdi:compass"
-    update_interval: ${calypso_update_interval}
-
-  - platform: template
-    id: calypso_compass_direction
-    name: "Calypso Compass Direction"
-    unit_of_measurement: "°"
-    accuracy_decimals: 2
-    icon: "mdi:compass-outline"
-    update_interval: ${calypso_update_interval}
+    
