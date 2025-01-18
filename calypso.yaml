@@ -31,6 +31,7 @@ wifi:
     password: !secret device_wifi_password
 
 substitutions:
+  calypso_mac_addr: 'F1:99:0B:73:1F:BB'    # Find the Mac Addr of your device and enter here
   calypso_update_interval: 1s
 
 captive_portal:
@@ -38,7 +39,7 @@ captive_portal:
 esp32_ble_tracker:
 
 ble_client:
-  - mac_address: F1:99:0B:73:1F:BB
+  - mac_address: ${calypso_mac_addr}
     id: calypso_wind_sensor
     on_passkey_request:
       then:
