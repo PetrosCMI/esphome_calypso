@@ -3,6 +3,12 @@ esphome:
   friendly_name: Calypso_HA
   platformio_options: 
     board_build.flash_mode: dio
+  on_boot:
+    priority: -100  # Ensure it runs after initial setup
+    then:
+      - logger.log:
+          format: "Connecting to BLE device on startup."
+      - ble_client.connect: calypso_wind_sensor
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -31,7 +37,6 @@ wifi:
     password: !secret device_wifi_password
 
 substitutions:
-  calypso_mac_addr: 'F1:99:0B:73:1F:BB'    # Find the Mac Addr of your device and enter here
   calypso_update_interval: 1s
 
 captive_portal:
@@ -39,8 +44,9 @@ captive_portal:
 esp32_ble_tracker:
 
 ble_client:
-  - mac_address: ${calypso_mac_addr}
+  - mac_address: F1:99:0B:73:1F:BB
     id: calypso_wind_sensor
+    auto_connect: true
     on_passkey_request:
       then:
         - logger.log:
@@ -145,4 +151,33 @@ sensor:
     unit_of_measurement: "C"
     accuracy_decimals: 1
     update_interval: ${calypso_update_interval}
-    
+
+# Add a script to handle BLE reconnection
+script:
+  - id: manage_ble_connection
+    then:
+      - logger.log:
+          format: "Disconnecting BLE due to low battery."
+      - lambda: |-
+          auto *client = id(calypso_wind_sensor);
+          client->set_auto_connect(false);  // Disable auto-connect
+      - ble_client.disconnect: calypso_wind_sensor
+      - delay: 60min  # Wait for 1 hour
+      - logger.log:
+          format: "Reconnecting BLE after 1 hour."
+      - lambda: |-
+          auto *client = id(calypso_wind_sensor);
+          client->set_auto_connect(true);  // Enable auto-connect
+      - ble_client.connect: calypso_wind_sensor
+
+
+# Automation for monitoring battery level
+interval:
+  - interval: 60s  # Check every 60 seconds
+    then:
+      - lambda: |-
+          if (id(calypso_battery_level).state <= 20.0 && id(calypso_wind_sensor).connected()) {
+            ESP_LOGW("Battery Monitor", "Battery is low (%.1f%%). Disconnecting BLE.", id(calypso_battery_level).state);
+            id(manage_ble_connection).execute();  // Execute the BLE management script
+          }
+
