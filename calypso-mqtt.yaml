@@ -1,0 +1,351 @@
+esphome:
+  name: calypso-mqtt
+  friendly_name: Calypso_mqtt
+  platformio_options: 
+    board_build.flash_mode: dio
+    #board_build.flash_size: 2MB     # XIAO ESP32C3 should have 4MB
+  on_boot:
+    priority: -100  # Ensure it runs after initial setup
+    then:
+      - lambda: |-
+          id(boot_time) = millis();  // Capture the boot time immediately after boot
+          id(reboot_count) += 1;
+          ESP_LOGI("reboot_counter", "Reboot count: %d", id(reboot_count));
+      - logger.log:
+          format: "Connecting to BLE device on startup."
+      - ble_client.connect: calypso_wind_sensor
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  level: INFO
+
+wifi: 
+  networks:
+    - ssid: !secret pbphone_ssid
+      password: !secret pbphone_password
+    - ssid: !secret cmi_wifi_ssid
+      password: !secret cmi_wifi_password
+    - ssid: !secret pd_ssid
+      password: !secret pd_password
+    - ssid: !secret silva_ssid
+      password: !secret silva_password
+  fast_connect: false    # allow scanning for all networks
+  reboot_timeout: 15min  # Reboot the device if Wi-Fi fails to connect within 15 minutes
+  #power_save_mode: none  # Optional: Optimize Wi-Fi performance for reconnection NOT COMPATIBLE with ble
+      
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Calypso-Mqtt Fallback Hotspot"
+    password: !secret device_wifi_password
+
+
+substitutions:
+  device_name: "calypso-mqtt"
+  mqtt_interval: "15000"
+  ota_url_base: !secret ota_baseurl
+  vessel_prefix: "vessel/PoleDancerCV"
+  calypso_update_interval: 1s
+  calypso_mac_addr: 'F1:99:0B:73:1F:BB'
+
+globals:
+  - id: mqtt_broker
+    type: std::string
+    restore_value: no
+    initial_value: ""
+  - id: ota_url
+    type: std::string
+    restore_value: no
+    initial_value: ""
+    #initial_value: "https://foo.com/foo.bin"
+  - id: ota_urlmd5
+    type: std::string
+    restore_value: no
+    initial_value: ""
+    #initial_value: "https://foo.com/foo.md5"
+  - id: boot_time
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: reboot_count
+    type: int
+    restore_value: yes   # Ensures the value is saved between reboots
+    initial_value: '0'
+  - id: firmware_update_count
+    type: int
+    restore_value: yes   # Ensures the value is saved between reboots
+    initial_value: '0'
+  - id: disconnect_time
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+# No API here ... it interferes with MQTT ... see https://esphome.io/components/mqtt.html
+
+http_request:
+  verify_ssl: false  # Set to true if your server has a valid SSL certificate
+
+ota:
+  - platform: http_request
+#    on_state_change:
+#      - logger.log: "OTA state change..."
+
+mqtt:
+  broker: !secret mqtt_broker
+  id: mqtt_client
+  port: 8883
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  discovery: false  # Disable Home Assistant discovery if not needed
+  topic_prefix: "vessel/PoleDancer/${device_name}"  # base 
+  clean_session: true  # Ensure this is set to true
+#  skip_cert_cn_check: true
+#  idf_send_async: false
+
+  certificate_authority: !secret mqtt_ca_certificate
+  client_certificate: !secret mqtt_client_certificate
+  client_certificate_key: !secret mqtt_client_certificate_key
+
+  birth_message:
+    topic: "${device_name}/status"
+    payload: online
+  will_message:
+    topic: "${device_name}/status"
+    payload: offline
+  on_message:
+    topic: "esphome/device/ota"
+    qos: 0
+    then:
+      - logger.log: "Trying to flash from id(ota_url)"
+      - lambda: |-
+          id(firmware_update_count) += 1;
+      - ota.http_request.flash:
+          md5_url: !lambda 'return id(ota_urlmd5);'
+          url: !lambda 'return id(ota_url);'
+      - logger.log: "This message should not be displayed because the device reboots"
+  reboot_timeout: 15min  # Reboot the device if Wi-Fi fails to connect within 15 minutes
+  on_connect: 
+    then:
+      - logger.log: "MQTT connected..."
+
+
+captive_portal:
+
+# Automation to publish the specific data to MQTT every 15 seconds
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          // Check if ota_url is empty
+          if (id(ota_url).empty()) {
+            std::string mac_addr = id(wifi_mac_address).state;
+
+            // Remove all colons from the MAC address
+            mac_addr.erase(std::remove(mac_addr.begin(), mac_addr.end(), ':'), mac_addr.end());
+
+            id(ota_url) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.bin";
+            id(ota_urlmd5) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.md5";
+            ESP_LOGD("pdbatterymon_log", "OTA base url updated to: %s", id(ota_url).c_str());
+          }
+
+  - interval: 15s  # Publish to MQTT every 15 seconds
+    then:
+      - lambda: |-
+          ESP_LOGI("pdbatterymon_log", "Boot time: %d, boot count: %d, update count: %d", id(boot_time), id(reboot_count), id(firmware_update_count) );
+          ESP_LOGI("pdbatterymon_log", "Current OTA URL: %s", id(ota_url).c_str());
+
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/wind/speedApparent/ultrasonic"
+          payload: !lambda |-
+            return( to_string(id(calypso_wind_speed).state));
+
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/wind/angleApparent/ultrasonic"
+          payload: !lambda |-
+            return( to_string(id(calypso_wind_angle).state));
+
+      - mqtt.publish:
+          topic: "${vessel_prefix}/electrical/batteries/wind_sensor/ultrasonic/level"
+          payload: !lambda |-
+            return( to_string(id(calypso_battery_level).state));
+
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/outside/temperature/ultrasonic"
+          payload: !lambda |-
+            return( to_string(id(calypso_temperature).state));
+
+esp32_ble_tracker:
+  on_ble_advertise:
+    - mac_address: ${calypso_mac_addr}
+      then:
+        - lambda: |-
+            int rssi = x.get_rssi();
+            id(ble_client_rssi).publish_state(rssi);
+
+ble_client:
+  - mac_address: ${calypso_mac_addr}
+    id: calypso_wind_sensor
+    auto_connect: true
+    on_passkey_request:
+      then:
+        - logger.log:
+            format: "Got on_passkey_request from BLE device"
+
+    on_connect:
+      then:
+        - lambda: |-
+            ESP_LOGW("BLE Client", "Connected to ULTRASONIC wind sensor.");
+
+            // REF:  https://github.com/stephpen/BLE_Wind/blob/main/BLE_Wind.ino
+            auto *client = id(calypso_wind_sensor);
+            if (client->connected()) {
+              // Write to characteristic 0xA003 - Data Fields
+              auto characteristic = client->get_characteristic(0x180D, 0xA003);
+              if (characteristic) {
+                uint8_t value = 0x00;   // 0 reads just the basic data, 1 reads extended data but at heavy battery use
+                characteristic->write_value(&value, 1);
+                ESP_LOGI("BLE Client", "Wrote value %02x to characteristic A003", value);
+              } else {
+                ESP_LOGE("BLE Client", "Failed to find characteristic A003");
+              }
+              // Write to characteristic 0xA002 - Data Rate
+              auto characteristic_A002 = client->get_characteristic(0x180D, 0xA002);
+              if (characteristic_A002) {
+                uint8_t value_A002 = 0x01;    // 1hz updates for least power drain
+                characteristic_A002->write_value(&value_A002, 1);
+                ESP_LOGI("BLE Client", "Wrote value %02x to characteristic A002", value_A002);
+              } else {
+                ESP_LOGE("BLE Client", "Failed to find characteristic A002");
+              }
+              id(calypso_connection).publish_state( 1 );
+              id(disconnect_time) = 0;
+            } else {
+              ESP_LOGE("BLE Client", "Failed to connect to BLE client");
+            }
+
+    on_disconnect:
+      then:
+        - lambda: |-
+            ESP_LOGW("BLE Client", "Disconnected from ULTRASONIC wind sensor.");
+
+sensor:
+  - platform: ble_client
+    ble_client_id: calypso_wind_sensor
+    name: "Calypso Wind Sensor"
+    service_uuid: "180D"
+    characteristic_uuid: "2A39"
+    # This fails because esphome is trying to process a float: https://www.esphome.io/api/ble__client__base_8cpp_source
+    # 
+    type: characteristic  # Add this line to specify the type as characteristic
+    notify: True
+    lambda: |-
+      ESP_LOGW("BLE main", "Received data is %d bytes: %s", x.size(), format_hex_pretty(x).c_str());
+      //uint8_t d0 = x[0];
+      uint16_t speed_raw = x[0] | ( x[1] << 8 );
+      // Combine the first two bytes into a 16-bit value
+      uint16_t wind_speed_raw = (x[1] << 8) | x[0];
+      int16_t wind_angle_raw = (x[3] << 8) | x[2];
+      int16_t compass_raw = (x[9] << 8) | x[8];
+      // REF: https://github.com/decipherindustries/signalk-calypso-ultrasonic/blob/master/lib/calypso-ultrasonic.js
+      //      Look into the function decode()
+      
+      // Convert raw wind speed to float m/s, then to knots per hour
+      float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
+      float wind_angle = wind_angle_raw * 1.0;
+      float compass = 360.0 - compass_raw;
+      ESP_LOGD("wind_sensor", "Received raw data: %u %d %d", wind_speed_raw, wind_angle_raw, compass_raw);  // Log the received value
+      id(calypso_wind_speed).publish_state(wind_speed);  // Update the sensor state in Home Assistant
+      id(calypso_wind_angle).publish_state(wind_angle);  // Update the sensor state in Home Assistant
+      id(calypso_battery_level).publish_state( x[4] * 10.0 );
+      id(calypso_temperature).publish_state( x[5] - 100.0 );
+      //id(calypso_compass_direction).publish_state(compass);  // Update the sensor state in Home Assistant
+      //id(calypso_roll).publish_state( x[6] - 90.0 );
+      //id(calypso_pitch).publish_state( x[7] - 90.0 );
+      return(0);
+
+  - platform: template
+    id: calypso_wind_speed
+    name: "Calypso Wind Speed"
+    unit_of_measurement: "kts"
+    accuracy_decimals: 1
+    icon: "mdi:weather-windy"
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_wind_angle
+    name: "Calypso Wind Angle"
+    unit_of_measurement: "°"
+    accuracy_decimals: 0
+    icon: "mdi:compass"
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_battery_level
+    name: "Calypso Battery Level"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    id: calypso_temperature
+    name: "Calypso Temperature"
+    unit_of_measurement: "C"
+    accuracy_decimals: 0
+    update_interval: ${calypso_update_interval}
+
+  - platform: template
+    name: "Calypso RSSI"
+    id: ble_client_rssi
+    unit_of_measurement: "dB"
+    accuracy_decimals: 0
+
+  - platform: template
+    name: "Calypso Connection State"
+    id: calypso_connection
+    accuracy_decimals: 0
+
+  - platform: template
+    name: "Disconnect Time (min)"
+    id: incrementing_counter
+    accuracy_decimals: 0
+    unit_of_measurement: "min"
+    update_interval: 60s
+    lambda: |-
+      // If we are not connected, decrement the minute counter
+      if( id(calypso_connection) == 0 )
+      {
+        id(disconnect_time) -= 1;
+      }
+      return id(disconnect_time);
+
+text_sensor:
+  - platform: wifi_info
+    mac_address:
+      id: wifi_mac_address
+      name: ESP Mac Wifi Address
+  - platform: template
+    id: firmware_url
+    name: "Firmware URL"
+  - platform: template
+    id: firmware_urlmd5
+    name: "Firmware URL MD5"
+
+  - platform: version
+    name: "ESPHome Version"
+
+  - platform: template
+    name: "Update URL"
+    id: update_url
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/Vancouver
+    servers:
+     - 0.pool.ntp.org
+     - 1.pool.ntp.org
+     - 2.pool.ntp.org
