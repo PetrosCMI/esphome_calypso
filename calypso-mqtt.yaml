@@ -8,9 +8,20 @@ esphome:
     priority: -100  # Ensure it runs after initial setup
     then:
       - lambda: |-
+          #include <esp_netif.h>
+          esp_netif_dns_info_t dns_info;
+          // Fetch primary DNS
+          esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_MAIN, &dns_info);
+          ESP_LOGI("wifi", "DNS 1: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
+
+          // Fetch backup DNS (if available)
+          esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_BACKUP, &dns_info);
+          ESP_LOGI("wifi", "DNS 2: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
+      - lambda: |-
           id(boot_time) = millis();  // Capture the boot time immediately after boot
           id(reboot_count) += 1;
           ESP_LOGI("reboot_counter", "Reboot count: %d", id(reboot_count));
+      - delay: 60s  # Wait for everything else before trying BLE
       - logger.log:
           format: "Connecting to BLE device on startup."
       - ble_client.connect: calypso_wind_sensor
@@ -37,11 +48,12 @@ wifi:
   fast_connect: false    # allow scanning for all networks
   reboot_timeout: 15min  # Reboot the device if Wi-Fi fails to connect within 15 minutes
   #power_save_mode: none  # Optional: Optimize Wi-Fi performance for reconnection NOT COMPATIBLE with ble
-      
+
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     ssid: "Calypso-Mqtt Fallback Hotspot"
     password: !secret device_wifi_password
+  id: wifi_component
 
 
 substitutions:
@@ -149,14 +161,14 @@ interval:
 
             id(ota_url) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.bin";
             id(ota_urlmd5) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.md5";
-            ESP_LOGD("pdbatterymon_log", "OTA base url updated to: %s", id(ota_url).c_str());
+            ESP_LOGD("calypso-mqtt", "OTA base url updated to: %s", id(ota_url).c_str());
           }
 
   - interval: 15s  # Publish to MQTT every 15 seconds
     then:
       - lambda: |-
-          ESP_LOGI("pdbatterymon_log", "Boot time: %d, boot count: %d, update count: %d", id(boot_time), id(reboot_count), id(firmware_update_count) );
-          ESP_LOGI("pdbatterymon_log", "Current OTA URL: %s", id(ota_url).c_str());
+          ESP_LOGI("calypso-mqtt", "Boot time: %d, boot count: %d, update count: %d", id(boot_time), id(reboot_count), id(firmware_update_count) );
+          ESP_LOGI("calypso-mqtt", "Current OTA URL: %s", id(ota_url).c_str());
 
       - mqtt.publish:
           topic: "${vessel_prefix}/environment/wind/speedApparent/ultrasonic"
@@ -177,6 +189,17 @@ interval:
           topic: "${vessel_prefix}/environment/outside/temperature/ultrasonic"
           payload: !lambda |-
             return( to_string(id(calypso_temperature).state));
+
+  # Automation for monitoring battery level
+  - interval: 60s  # Check every 60 seconds
+    then:
+      - lambda: |-
+          ESP_LOGW("Battery Monitor", "Checking battery level (%.1f%%)...", id(calypso_battery_level).state);
+          if (id(calypso_battery_level).state <= 20.0 && id(calypso_wind_sensor).connected()) {
+            ESP_LOGW("Battery Monitor", "Battery is low (%.1f%%). Disconnecting BLE.", id(calypso_battery_level).state);
+            id(manage_ble_connection).execute();  // Execute the BLE management script
+          }
+
 
 esp32_ble_tracker:
   on_ble_advertise:
@@ -231,6 +254,28 @@ ble_client:
       then:
         - lambda: |-
             ESP_LOGW("BLE Client", "Disconnected from ULTRASONIC wind sensor.");
+
+# Add a script to handle BLE reconnection
+script:
+  - id: manage_ble_connection
+    then:
+      - logger.log:
+          format: "Disconnecting BLE due to low battery."
+      - lambda: |-
+          auto *client = id(calypso_wind_sensor);
+          client->set_auto_connect(false);  // Disable auto-connect
+          id(calypso_connection).publish_state( 0 );
+          id(disconnect_time) = 60;
+      - ble_client.disconnect: calypso_wind_sensor
+      - delay: 60min  # Wait for 1 hour
+      - logger.log:
+          format: "Reconnecting BLE after 1 hour."
+      - lambda: |-
+          auto *client = id(calypso_wind_sensor);
+          client->set_auto_connect(true);  // Enable auto-connect
+          id(disconnect_time) = 0;
+      - ble_client.connect: calypso_wind_sensor
+
 
 sensor:
   - platform: ble_client
