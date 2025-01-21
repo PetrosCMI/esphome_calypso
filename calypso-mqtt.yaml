@@ -7,6 +7,7 @@ esphome:
   on_boot:
     priority: -100  # Ensure it runs after initial setup
     then:
+      - logger.log: "Show WIFI info..."
       - lambda: |-
           #include <esp_netif.h>
           esp_netif_dns_info_t dns_info;
@@ -17,11 +18,16 @@ esphome:
           // Fetch backup DNS (if available)
           esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_BACKUP, &dns_info);
           ESP_LOGI("wifi", "DNS 2: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
+      - logger.log: "Show boot/reboot info..."
       - lambda: |-
           id(boot_time) = millis();  // Capture the boot time immediately after boot
           id(reboot_count) += 1;
           ESP_LOGI("reboot_counter", "Reboot count: %d", id(reboot_count));
+      - delay: 10s
+      - logger.log: "Enable MQTT ..."
+      - mqtt.enable:    # manually enable mqtt after wifi
       - delay: 60s  # Wait for everything else before trying BLE
+      - logger.log: "Enable BLE ..."
       - logger.log:
           format: "Connecting to BLE device on startup."
       - ble_client.connect: calypso_wind_sensor
@@ -112,6 +118,7 @@ mqtt:
   port: 8883
   username: !secret mqtt_user
   password: !secret mqtt_password
+  enable_on_boot: false
   discovery: false  # Disable Home Assistant discovery if not needed
   topic_prefix: "vessel/PoleDancer/${device_name}"  # base 
   clean_session: true  # Ensure this is set to true
