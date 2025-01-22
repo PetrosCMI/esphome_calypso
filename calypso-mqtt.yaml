@@ -171,12 +171,8 @@ interval:
             ESP_LOGD("calypso-mqtt", "OTA base url updated to: %s", id(ota_url).c_str());
           }
 
-  - interval: 15s  # Publish to MQTT every 15 seconds
+  - interval: 5s
     then:
-      - lambda: |-
-          ESP_LOGI("calypso-mqtt", "Boot time: %d, boot count: %d, update count: %d", id(boot_time), id(reboot_count), id(firmware_update_count) );
-          ESP_LOGI("calypso-mqtt", "Current OTA URL: %s", id(ota_url).c_str());
-
       - mqtt.publish:
           topic: "${vessel_prefix}/environment/wind/speedApparent/ultrasonic"
           payload: !lambda |-
@@ -186,6 +182,12 @@ interval:
           topic: "${vessel_prefix}/environment/wind/angleApparent/ultrasonic"
           payload: !lambda |-
             return( to_string(id(calypso_wind_angle).state));
+
+  - interval: 60s
+    then:
+      - lambda: |-
+          ESP_LOGI("calypso-mqtt", "Boot time: %d, boot count: %d, update count: %d", id(boot_time), id(reboot_count), id(firmware_update_count) );
+          ESP_LOGI("calypso-mqtt", "Current OTA URL: %s", id(ota_url).c_str());
 
       - mqtt.publish:
           topic: "${vessel_prefix}/electrical/batteries/wind_sensor/ultrasonic/level"
@@ -197,11 +199,16 @@ interval:
           payload: !lambda |-
             return( to_string(id(calypso_temperature).state));
 
+      - mqtt.publish:
+          topic: "${vessel_prefix}/electrical/rssi/wind_sensor/ultrasonic"
+          payload: !lambda |-
+            return( to_string(id(ble_client_rssi).state));
+
   # Automation for monitoring battery level
-  - interval: 60s  # Check every 60 seconds
+  - interval: 30s
     then:
       - lambda: |-
-          ESP_LOGW("Battery Monitor", "Checking battery level (%.1f%%)...", id(calypso_battery_level).state);
+          // ESP_LOGW("Battery Monitor", "Checking battery level (%.1f%%)...", id(calypso_battery_level).state);
           if (id(calypso_battery_level).state <= 20.0 && id(calypso_wind_sensor).connected()) {
             ESP_LOGW("Battery Monitor", "Battery is low (%.1f%%). Disconnecting BLE.", id(calypso_battery_level).state);
             id(manage_ble_connection).execute();  // Execute the BLE management script
@@ -309,14 +316,20 @@ sensor:
       float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
       float wind_angle = wind_angle_raw * 1.0;
       float compass = 360.0 - compass_raw;
+      int batteryLevel = x[4] * 10;
       ESP_LOGD("wind_sensor", "Received raw data: %u %d %d", wind_speed_raw, wind_angle_raw, compass_raw);  // Log the received value
       id(calypso_wind_speed).publish_state(wind_speed);  // Update the sensor state in Home Assistant
       id(calypso_wind_angle).publish_state(wind_angle);  // Update the sensor state in Home Assistant
-      id(calypso_battery_level).publish_state( x[4] * 10.0 );
+      id(calypso_battery_level).publish_state( batteryLevel );
       id(calypso_temperature).publish_state( x[5] - 100.0 );
       //id(calypso_compass_direction).publish_state(compass);  // Update the sensor state in Home Assistant
       //id(calypso_roll).publish_state( x[6] - 90.0 );
       //id(calypso_pitch).publish_state( x[7] - 90.0 );
+      if( batteryLevel <= 20 )
+      {
+        // Execute the script that disconnects from BLE
+        id(manage_ble_connection).execute();  // Execute the BLE management script
+      }
       return(0);
 
   - platform: template
@@ -368,7 +381,8 @@ sensor:
     update_interval: 60s
     lambda: |-
       // If we are not connected, decrement the minute counter
-      if( id(calypso_connection) == 0 )
+      ESP_LOGW("calypso-mqtt.disconnect counter", "Connection %d, disconnect time: %d", id(calypso_connection), id(disconnect_time) );
+      if( id(calypso_connection).state == 0 )
       {
         id(disconnect_time) -= 1;
       }
