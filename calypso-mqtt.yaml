@@ -101,6 +101,22 @@ globals:
     type: int
     restore_value: false
     initial_value: '0'
+  - id: minute_counter
+    type: int
+    restore_value: false
+    initial_value: '0'  # Start from 0 or any desired initial value
+  - id: offline_time # Seconds since the last update from 
+    type: int
+    restore_value: true
+    initial_value: '0'  # Start from 0 or any desired initial value
+  - id: max_offline_time  # max minutes of no-data when we should be online
+    type: int
+    restore_value: False
+    initial_value: '10'  # this is a global const
+  - id: min_battery_level
+    type: int
+    restore_value: False
+    initial_value: '40'   # global const
 
 # No API here ... it interferes with MQTT ... see https://esphome.io/components/mqtt.html
 
@@ -154,6 +170,11 @@ mqtt:
 
 captive_portal:
 
+switch:
+  - platform: restart
+    name: "Restart ESP32"
+    id: restart_switch
+
 # Automation to publish the specific data to MQTT every 15 seconds
 interval:
   - interval: 60s
@@ -169,6 +190,17 @@ interval:
             id(ota_url) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.bin";
             id(ota_urlmd5) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.md5";
             ESP_LOGD("calypso-mqtt", "OTA base url updated to: %s", id(ota_url).c_str());
+          }
+      - lambda: |-
+          if( id(disconnect_time) == 0 )
+          {
+            id( offline_time ) = id( offline_time ) + 1;
+            ESP_LOGD("calypso-mqtt", "Offline for %d mins", id( offline_time ) );
+            if( id( offline_time ) > id( max_offline_time ) )
+            {
+              ESP_LOGD("calypso-mqtt", "Restarting since we are not getting data from Calypso" );
+              id(restart_switch).turn_on();
+            }
           }
 
   - interval: 5s
@@ -187,7 +219,7 @@ interval:
     then:
       - lambda: |-
           ESP_LOGI("calypso-mqtt", "Boot time: %d, boot count: %d, update count: %d", id(boot_time), id(reboot_count), id(firmware_update_count) );
-          ESP_LOGI("calypso-mqtt", "Current OTA URL: %s", id(ota_url).c_str());
+          //ESP_LOGI("calypso-mqtt", "OTA URL: %s", id(ota_url).c_str());
 
       - mqtt.publish:
           topic: "${vessel_prefix}/electrical/batteries/wind_sensor/ultrasonic/level"
@@ -203,16 +235,6 @@ interval:
           topic: "${vessel_prefix}/electrical/rssi/wind_sensor/ultrasonic"
           payload: !lambda |-
             return( to_string(id(ble_client_rssi).state));
-
-  # Automation for monitoring battery level
-  - interval: 30s
-    then:
-      - lambda: |-
-          // ESP_LOGW("Battery Monitor", "Checking battery level (%.1f%%)...", id(calypso_battery_level).state);
-          if (id(calypso_battery_level).state <= 20.0 && id(calypso_wind_sensor).connected()) {
-            ESP_LOGW("Battery Monitor", "Battery is low (%.1f%%). Disconnecting BLE.", id(calypso_battery_level).state);
-            id(manage_ble_connection).execute();  // Execute the BLE management script
-          }
 
 
 esp32_ble_tracker:
@@ -276,12 +298,23 @@ script:
       - logger.log:
           format: "Disconnecting BLE due to low battery."
       - lambda: |-
+          ESP_LOGI("manage_ble_connection", "Going to disconnect..." );
           auto *client = id(calypso_wind_sensor);
+          delay(500);  // Small delay before stopping auto-connect
           client->set_auto_connect(false);  // Disable auto-connect
           id(calypso_connection).publish_state( 0 );
-          id(disconnect_time) = 60;
+          int minsToRest = 0;
+          if( id(calypso_battery_level).state >= 30 )
+            minsToRest = 5;
+          else
+            minsToRest = 60;
+          id(disconnect_time) = minsToRest;     // let it rest for an hour
+          ESP_LOGI("BLE Client", "Disconnecting for %d mins.", minsToRest );
+          id( disconnect_time ) = minsToRest;
+      - delay: 500ms  # Ensure commands take effect before disconnect
       - ble_client.disconnect: calypso_wind_sensor
-      - delay: 60min  # Wait for 1 hour
+      #- delay: 60min  # Wait for 1 hour
+      - delay: !lambda "return id(disconnect_time) * 60 * 1000;"
       - logger.log:
           format: "Reconnecting BLE after 1 hour."
       - lambda: |-
@@ -311,7 +344,7 @@ sensor:
       int16_t compass_raw = (x[9] << 8) | x[8];
       // REF: https://github.com/decipherindustries/signalk-calypso-ultrasonic/blob/master/lib/calypso-ultrasonic.js
       //      Look into the function decode()
-      
+      id( offline_time ) = 0;    // Just got a value, reset the offline counter      
       // Convert raw wind speed to float m/s, then to knots per hour
       float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
       float wind_angle = wind_angle_raw * 1.0;
@@ -325,9 +358,11 @@ sensor:
       //id(calypso_compass_direction).publish_state(compass);  // Update the sensor state in Home Assistant
       //id(calypso_roll).publish_state( x[6] - 90.0 );
       //id(calypso_pitch).publish_state( x[7] - 90.0 );
-      if( batteryLevel <= 20 )
+      if( batteryLevel <= id( min_battery_level ) )
       {
         // Execute the script that disconnects from BLE
+        auto *client = id(calypso_wind_sensor);
+        client->set_auto_connect(false);  // Disable auto-connect
         id(manage_ble_connection).execute();  // Execute the BLE management script
       }
       return(0);
@@ -388,6 +423,13 @@ sensor:
       }
       return id(disconnect_time);
 
+  - platform: template
+    name: "Minute Counter"
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: |-
+      id(minute_counter) += 1;  // Increment the counter every minute
+      return id(minute_counter);
 text_sensor:
   - platform: wifi_info
     mac_address:
