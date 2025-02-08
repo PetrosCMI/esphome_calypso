@@ -112,6 +112,10 @@ globals:
     type: int
     restore_value: False
     initial_value: '50'   # global const
+  - id: extended_data
+    type: int
+    restore_value: False
+    initial_value: '0'
 
 # No API here ... it interferes with MQTT ... see https://esphome.io/components/mqtt.html
 
@@ -231,6 +235,44 @@ interval:
                                         "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"};
             int index = (int) round(id(calypso_wind_angle).state / 22.5) % 16;
             std::string wind_direction_text = directions[index];
+            if( id( extended_data ) )
+            {
+              return "{"
+                    "\"angleApparent\": {"
+                        "\"value\": " + to_string(id(calypso_wind_angle).state) + ", "
+                        "\"text\": \"" + wind_direction_text + "\", "
+                        "\"units\": \"°\""
+                    "}, "
+                    "\"speed\": {"
+                        "\"value\": " + to_string(id(calypso_wind_speed).state) + ", "
+                        "\"units\": \"m/s\""
+                    "}, "
+                    "\"temperature\": {"
+                        "\"value\": " + to_string(id(calypso_temperature).state) + ", "
+                        "\"units\": \"°C\""
+                    "}, "
+                    "\"battery\": {"
+                        "\"value\": " + to_string(id(calypso_battery_level).state) + ", "
+                        "\"units\": \"%\""
+                    "}, "
+                    "\"heading\": {"
+                        "\"value\": " + to_string(id(calypso_compass_direction).state) + ", "
+                        "\"units\": \"°\""
+                    "}, "
+                    "\"pitch\": {"
+                        "\"value\": " + to_string(id(calypso_pitch).state) + ", "
+                        "\"units\": \"°\""
+                    "}, "
+                    "\"roll\": {"
+                        "\"value\": " + to_string(id(calypso_roll).state) + ", "
+                        "\"units\": \"°\""
+                    "}, "
+                    "\"timestamp\": \"" + std::string(buffer_now) + "\", "  // Fixed comma and quote here
+                    "\"boottime\": \"" + std::string(buffer_boot) + "\""
+                    "}";
+            }
+            else
+            {
             return "{"
                   "\"angleApparent\": {"
                       "\"value\": " + to_string(id(calypso_wind_angle).state) + ", "
@@ -252,6 +294,7 @@ interval:
                   "\"timestamp\": \"" + std::string(buffer_now) + "\", "  // Fixed comma and quote here
                   "\"boottime\": \"" + std::string(buffer_boot) + "\""
                   "}";
+            }
 
 
   - interval: 60s
@@ -397,9 +440,33 @@ sensor:
       id(calypso_wind_angle_raw).publish_state(wind_angle);  // Update the sensor state in Home Assistant
       id(calypso_battery_level).publish_state( batteryLevel );
       id(calypso_temperature).publish_state( x[5] - 100.0 );
-      //id(calypso_compass_direction).publish_state(compass);  // Update the sensor state in Home Assistant
-      //id(calypso_roll).publish_state( x[6] - 90.0 );
-      //id(calypso_pitch).publish_state( x[7] - 90.0 );
+      if( id( extended_data ) )
+      {
+        id(calypso_compass_direction).publish_state(compass);  // Update the sensor state in Home Assistant
+        id(calypso_roll).publish_state( x[6] - 90.0 );
+        id(calypso_pitch).publish_state( x[7] - 90.0 );
+      }
+
+      // Do the extended data check
+      if( id( extended_data ) && batteryLevel < 90 )
+      {
+        auto *client = id(calypso_wind_sensor);
+        auto characteristic = client->get_characteristic(0x180D, 0xA003);
+        // Shift to basic data
+        uint8_t value = 0x00;   // 0 reads just the basic data, 1 reads extended data but at heavy battery use
+        characteristic->write_value(&value, 1);
+        id( extended_data ) = 0;
+      }
+      else if( !id( extended_data ) && batteryLevel >= 90 )
+      {
+        auto *client = id(calypso_wind_sensor);
+        auto characteristic = client->get_characteristic(0x180D, 0xA003);
+        // Shift to extended data
+        uint8_t value = 0x01;   // 0 reads just the basic data, 1 reads extended data but at heavy battery use
+        characteristic->write_value(&value, 1);
+        id( extended_data ) = 1;
+      }
+
       static int numSamples = 0;
       ++numSamples;
       if( numSamples > ${minNumSamples} )
@@ -441,6 +508,24 @@ sensor:
           send_every: 1
 
   - platform: template
+    id: calypso_compass_direction
+    name: calypso_heading
+    unit_of_measurement: "°"
+    internal: true  # Hide from Home Assistant
+
+  - platform: template
+    id: calypso_roll
+    name: calypso_roll
+    unit_of_measurement: "°"
+    internal: true  # Hide from Home Assistant
+
+  - platform: template
+    id: calypso_pitch
+    name: calypso_pitch
+    unit_of_measurement: "°"
+    internal: true  # Hide from Home Assistant
+
+  - platform: template
     id: calypso_wind_speed_raw
     name: "Wind Speed (Raw)"
     unit_of_measurement: "knots"
@@ -479,6 +564,7 @@ sensor:
     internal: true  # Hide from Home Assistant
     accuracy_decimals: 0
     update_interval: ${calypso_update_interval}
+
 
   - platform: template
     name: "Calypso RSSI"
