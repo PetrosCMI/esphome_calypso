@@ -17,11 +17,7 @@ esphome:
           // Fetch backup DNS (if available)
           esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_BACKUP, &dns_info);
           ESP_LOGI("on_boot", "DNS 2: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
-      - lambda: |-
-          ESP_LOGI("on_boot", "Show boot/reboot info..." );
-          id(boot_time) = millis();  // Capture the boot time immediately after boot
-          id(reboot_count) += 1;
-          ESP_LOGI("on_boot", "Reboot count: %d", id(reboot_count));
+
       - delay: 15s
       - logger.log: { format: "Enabling MQTT...", level: INFO }
       - mqtt.enable:    # manually enable mqtt after wifi
@@ -104,13 +100,9 @@ globals:
     type: int
     restore_value: false
     initial_value: '0'
-  - id: minute_counter
-    type: int
-    restore_value: false
-    initial_value: '0'  # Start from 0 or any desired initial value
   - id: offline_time # Seconds since the last update from 
     type: int
-    restore_value: true
+    restore_value: false
     initial_value: '0'  # Start from 0 or any desired initial value
   - id: max_offline_time  # max minutes of no-data when we should be online
     type: int
@@ -119,7 +111,7 @@ globals:
   - id: min_battery_level
     type: int
     restore_value: False
-    initial_value: '40'   # global const
+    initial_value: '50'   # global const
 
 # No API here ... it interferes with MQTT ... see https://esphome.io/components/mqtt.html
 
@@ -180,6 +172,7 @@ switch:
     name: "Restart ESP32"
     id: restart_switch
 
+
 # Automation to publish the specific data to MQTT every 15 seconds
 interval:
   - interval: 60s
@@ -197,6 +190,7 @@ interval:
             ESP_LOGD("calypso-mqtt", "OTA base url updated to: %s", id(ota_url).c_str());
           }
       - lambda: |-
+          // Check to see if it has been too long since we reported any data.  If so, reboot the ESP
           if( id(disconnect_time) == 0 )
           {
             id( offline_time ) = id( offline_time ) + 1;
@@ -204,9 +198,10 @@ interval:
             if( id( offline_time ) > id( max_offline_time ) )
             {
               ESP_LOGD("calypso-mqtt", "Restarting since we are not getting data from Calypso" );
-              id(restart_switch).turn_on();
+              ///////////////////////////////////////////////////////////////////////////id(restart_switch).turn_on();
             }
           }
+
 
   - interval: 10s
     then:
@@ -223,24 +218,41 @@ interval:
       - mqtt.publish:
           topic: "${vessel_prefix}/environment/wind/calypso"
           payload: !lambda |-
-            char buffer[30];
+            char buffer_now[25];
             time_t now = id(sntp_time).now().timestamp;  // Get current time
-            strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", gmtime(&now));  // Format as ISO 8601 UTC
+            strftime(buffer_now, sizeof(buffer_now), "%Y-%m-%dT%H:%M:%SZ", gmtime(&now)); 
 
-            return "{\"angleApparent\": {\"value\": " + to_string(id(calypso_wind_angle).state) + 
-                  ", \"units\": \"°\"}, " +
-                  "\"speed\": {\"value\": " + to_string(id(calypso_wind_speed).state) + 
-                  ", \"units\": \"m/s\"}, " +
-                  "\"temperature\": {\"value\": " + to_string(id(calypso_temperature).state) + 
-                  ", \"units\": \"°C\"}, " +
-                  "\"battery\": {\"value\": " + to_string(id(calypso_battery_level).state) + 
-                  ", \"units\": \"%\"}, " +
-                  "\"timestamp\": \"" + std::string(buffer) + "\"}";
+            char buffer_boot[25];
+            time_t boot_time_t = static_cast<time_t>(id(boot_time));
+            strftime(buffer_boot, sizeof(buffer_boot), "%Y-%m-%dT%H:%M:%SZ", gmtime(&boot_time_t));
 
-      - mqtt.publish:
-          topic: "${vessel_prefix}/environment/wind/calypso/boottime"
-          payload: !lambda |-
-            return( to_string(id(boot_time_sensor).state));
+            // Define wind direction labels
+            const char* directions[] = {"N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                                        "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"};
+            int index = (int) round(id(calypso_wind_angle).state / 22.5) % 16;
+            std::string wind_direction_text = directions[index];
+            return "{"
+                  "\"angleApparent\": {"
+                      "\"value\": " + to_string(id(calypso_wind_angle).state) + ", "
+                      "\"text\": \"" + wind_direction_text + "\", "
+                      "\"units\": \"°\""
+                  "}, "
+                  "\"speed\": {"
+                      "\"value\": " + to_string(id(calypso_wind_speed).state) + ", "
+                      "\"units\": \"m/s\""
+                  "}, "
+                  "\"temperature\": {"
+                      "\"value\": " + to_string(id(calypso_temperature).state) + ", "
+                      "\"units\": \"°C\""
+                  "}, "
+                  "\"battery\": {"
+                      "\"value\": " + to_string(id(calypso_battery_level).state) + ", "
+                      "\"units\": \"%\""
+                  "}, "
+                  "\"timestamp\": \"" + std::string(buffer_now) + "\", "  // Fixed comma and quote here
+                  "\"boottime\": \"" + std::string(buffer_boot) + "\""
+                  "}";
+
 
   - interval: 60s
     then:
@@ -262,7 +274,6 @@ interval:
           topic: "${vessel_prefix}/electrical/rssi/wind_sensor/ultrasonic"
           payload: !lambda |-
             return( to_string(id(ble_client_rssi).state));
-
 
 esp32_ble_tracker:
   on_ble_advertise:
@@ -324,23 +335,26 @@ script:
     then:
       - logger.log:
           format: "Disconnecting BLE due to low battery."
+      - delay: 100ms  # Ensure commands take effect before disconnect
       - lambda: |-
           ESP_LOGI("manage_ble_connection", "Going to disconnect..." );
           auto *client = id(calypso_wind_sensor);
-          delay(500);  // Small delay before stopping auto-connect
           client->set_auto_connect(false);  // Disable auto-connect
           id(calypso_connection).publish_state( 0 );
-          int minsToRest = 0;
-          if( id(calypso_battery_level).state >= 30 )
-            minsToRest = 5;
-          else
-            minsToRest = 60;
+          int minsToRest = (id(calypso_battery_level).state >= 30) ? 5 : 60;
           id(disconnect_time) = minsToRest;     // let it rest for an hour
           ESP_LOGI("BLE Client", "Disconnecting for %d mins.", minsToRest );
-          id( disconnect_time ) = minsToRest;
-      - delay: 500ms  # Ensure commands take effect before disconnect
-      - ble_client.disconnect: calypso_wind_sensor
-      #- delay: 60min  # Wait for 1 hour
+      - delay: 100ms  # Ensure commands take effect before disconnect
+      #- ble_client.disconnect: calypso_wind_sensor
+      - lambda: |-
+          auto *client = id(calypso_wind_sensor);
+          if (client->connected()) {
+            ESP_LOGI("BLE Client", "Disconnecting now...");
+            client->disconnect();
+          } else {
+            ESP_LOGI("BLE Client", "Already disconnected.");
+          }
+        # Wait for 1 hour
       - delay: !lambda "return id(disconnect_time) * 60 * 1000;"
       - logger.log:
           format: "Reconnecting BLE after 1 hour."
@@ -354,6 +368,7 @@ script:
 sensor:
   - platform: ble_client
     ble_client_id: calypso_wind_sensor
+    internal: true  # Hide from Home Assistant
     name: "Calypso Wind Sensor"
     service_uuid: "180D"
     characteristic_uuid: "2A39"
@@ -402,34 +417,10 @@ sensor:
       return(0);
 
   - platform: template
-    id: calypso_wind_speed_raw
-    name: "Wind Speed (Raw)"
-    unit_of_measurement: "knots"
-    internal: true  # Hide from Home Assistant since it's only used internally
-
-  - platform: template
     id: calypso_wind_angle_raw
     name: "Wind Angle (Raw)"
     unit_of_measurement: "°"
     internal: true  # Hide from Home Assistant
-
-  - platform: template
-    id: calypso_wind_speed
-    name: "Calypso Wind Speed"
-    unit_of_measurement: "kts"
-    internal: true  # Hide from Home Assistant
-    accuracy_decimals: 1
-    icon: "mdi:weather-windy"
-    update_interval: ${calypso_update_interval}
-    lambda: |-
-      if (std::isnan(id(calypso_wind_speed_raw).state)) {
-        return {};  // Prevents publishing while NaN
-      }
-      return id(calypso_wind_speed_raw).state;
-    filters:
-      - max:
-          window_size: ${window_size}
-          send_every: 1
 
   - platform: template
     id: calypso_wind_angle
@@ -447,6 +438,30 @@ sensor:
     filters:
       - sliding_window_moving_average:
           window_size: 5
+          send_every: 1
+
+  - platform: template
+    id: calypso_wind_speed_raw
+    name: "Wind Speed (Raw)"
+    unit_of_measurement: "knots"
+    internal: true  # Hide from Home Assistant since it's only used internally
+
+  - platform: template
+    id: calypso_wind_speed
+    name: "Calypso Wind Speed"
+    unit_of_measurement: "kts"
+    internal: true  # Hide from Home Assistant
+    accuracy_decimals: 1
+    icon: "mdi:weather-windy"
+    update_interval: ${calypso_update_interval}
+    lambda: |-
+      if (std::isnan(id(calypso_wind_speed_raw).state)) {
+        return {};  // Prevents publishing while NaN
+      }
+      return id(calypso_wind_speed_raw).state;
+    filters:
+      - max:
+          window_size: ${window_size}
           send_every: 1
 
   - platform: template
@@ -468,17 +483,20 @@ sensor:
   - platform: template
     name: "Calypso RSSI"
     id: ble_client_rssi
+    internal: false
     unit_of_measurement: "dB"
     accuracy_decimals: 0
 
   - platform: template
     name: "Calypso Connection State"
     id: calypso_connection
+    internal: false
     accuracy_decimals: 0
 
   - platform: template
     name: "Disconnect Time (min)"
     id: incrementing_counter
+    internal: false
     accuracy_decimals: 0
     unit_of_measurement: "min"
     update_interval: 60s
@@ -491,18 +509,12 @@ sensor:
       ESP_LOGW("calypso-mqtt.disconnect counter", "Connection %d, disconnect time: %d", id(calypso_connection), id(disconnect_time) );
       return id(disconnect_time);
 
-  - platform: template
-    name: "Minute Counter"
-    accuracy_decimals: 0
-    update_interval: 60s
-    lambda: |-
-      id(minute_counter) += 1;  // Increment the counter every minute
-      return id(minute_counter);
 text_sensor:
   - platform: wifi_info
     mac_address:
       id: wifi_mac_address
       name: ESP Mac Wifi Address
+
   - platform: template
     id: firmware_url
     name: "Firmware URL"
@@ -519,8 +531,20 @@ text_sensor:
 
   - platform: template
     name: "Boot Time"
-    id: boot_time_sensor
+    id: sntp_boot_time
     update_interval: never  # This is determined elsewhere
+
+  - platform: template
+    name: "Calypso Wind Direction Text"
+    id: calypso_wind_direction_text
+    lambda: |-
+      static const char* directions[] = {"N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                                         "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"};
+      if (isnan(id(calypso_wind_angle).state)) {
+        return std::string("Unknown");
+      }
+      int index = (int)round(id(calypso_wind_angle).state / 22.5) % 16;
+      return std::string(directions[index]);
 
 time:
   - platform: sntp
@@ -533,9 +557,17 @@ time:
     on_time_sync:
       then:
         - text_sensor.template.publish:
-            id: boot_time_sensor
+            id: sntp_boot_time
             state: !lambda |-
               char buffer[20];
               time_t now = id(sntp_time).now().timestamp;
-              strftime(buffer, sizeof(buffer), "%y-%b-%d %H:%M:%S", localtime(&now));
-              return {buffer};
+              id( boot_time ) = now;
+              return( "" );
+    on_time:
+      - seconds: 0
+        minutes: /60           # Trigger every X minutes
+        then:
+          - logger.log: "Rebooting device every 60 minutes"
+          - delay: 1 s    # let the log message get out
+          - switch.turn_on: restart_switch
+
