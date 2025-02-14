@@ -18,15 +18,37 @@ esphome:
           esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_BACKUP, &dns_info);
           ESP_LOGI("on_boot", "DNS 2: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
 
-      - delay: 15s
-      - logger.log: { format: "Enabling MQTT...", level: INFO }
-      - mqtt.enable:    # manually enable mqtt after wifi
-      - delay: 15s  # Wait for everything else before trying BLE
+      - delay: 5s
       - lambda: |-
-          ESP_LOGI("on_boot", "Enabling BLE..." );
+          ESP_LOGI("on_boot", "WiFi Status: %d", id(wifi_status).state);
+      - logger.log: { format: "Initial...", level: INFO }
+      - lambda: |-
+          id( calypso_compass_direction ) = 0;
+          id( calypso_pitch ) = 0;
+          id( calypso_roll ) = 0;
+      - logger.log: { format: "Setting up URLs...", level: INFO }
+      - lambda: |-
+          id(ota_url) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.bin";
+          id( firmware_url ).state = id( ota_url );
+          id(ota_urlmd5) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.md5";
+          ESP_LOGI("on_boot", "OTA base url updated to: %s", id(ota_url).c_str());
+      - logger.log: { format: "on_boot: Checking Wi-Fi connection...", level: INFO }
+      - while:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - logger.log: { format: "on_boot: Waiting for Wi-Fi connection...", level: INFO }
+            - lambda: |-
+                ESP_LOGI("on_boot", "WIFI connection state: %d", id(wifi_status).state );
+            - delay: 1s  # Retry every 1 second if not connected
+      - logger.log: { format: "on_boot: Wi-Fi connected, enabling MQTT...", level: INFO }
+      - mqtt.enable:    # manually enable mqtt after wifi
+      - delay: 5s  # Wait for everything else before trying BLE
+      - logger.log: { format: "Enabling BLE...", level: INFO }
+      - lambda: |-
           auto *client = id(calypso_wind_sensor);
           client->set_auto_connect(true);  // Enable auto-connect
-          ESP_LOGI("on_boot", "Connecting to BLE ..." );
       - ble_client.connect: calypso_wind_sensor
 
 esp32:
@@ -58,7 +80,6 @@ wifi:
     password: !secret device_wifi_password
   id: wifi_component
 
-
 substitutions:
   device_name: "calypso-mqtt"
   mqtt_interval: "15000"
@@ -78,12 +99,10 @@ globals:
     type: std::string
     restore_value: no
     initial_value: ""
-    #initial_value: "https://foo.com/foo.bin"
   - id: ota_urlmd5
     type: std::string
     restore_value: no
     initial_value: ""
-    #initial_value: "https://foo.com/foo.md5"
   - id: boot_time
     type: int
     restore_value: no
@@ -116,6 +135,10 @@ globals:
     type: int
     restore_value: False
     initial_value: '0'
+  - id: extended_data_min_battery
+    type: int
+    restore_value: False
+    initial_value: '80'
 
 # No API here ... it interferes with MQTT ... see https://esphome.io/components/mqtt.html
 
@@ -126,6 +149,11 @@ ota:
   - platform: http_request
 #    on_state_change:
 #      - logger.log: "OTA state change..."
+
+# This is so we can host data requests
+web_server:
+  port: 80
+
 
 mqtt:
   broker: !secret mqtt_broker
@@ -151,16 +179,24 @@ mqtt:
     topic: "${device_name}/status"
     payload: offline
   on_message:
-    topic: "esphome/device/ota"
-    qos: 0
-    then:
-      - logger.log: "Trying to flash from id(ota_url)"
-      - lambda: |-
-          id(firmware_update_count) += 1;
-      - ota.http_request.flash:
-          md5_url: !lambda 'return id(ota_urlmd5);'
-          url: !lambda 'return id(ota_url);'
-      - logger.log: "This message should not be displayed because the device reboots"
+    - topic: "esphome/device/ota/${device_name}"
+      qos: 0
+      then:
+        - logger.log: "Trying to flash from id(ota_url)"
+        - lambda: |-
+            id(firmware_update_count) += 1;
+        - ota.http_request.flash:
+            md5_url: !lambda 'return id(ota_urlmd5);'
+            url: !lambda 'return id(ota_url);'
+        - logger.log: "This message should not be displayed because the device reboots"
+
+    - topic: "esphome/device/reboot/${device_name}"
+      qos: 0
+      then:
+        - logger.log: "Rebooting"
+        - delay: 2s
+        - switch.turn_on: restart_switch
+        - logger.log: "This message should not be displayed because the device reboots"
   reboot_timeout: 15min  # Reboot the device if Wi-Fi fails to connect within 15 minutes
   on_connect: 
     then:
@@ -181,18 +217,6 @@ switch:
 interval:
   - interval: 60s
     then:
-      - lambda: |-
-          // Check if ota_url is empty
-          if (id(ota_url).empty()) {
-            std::string mac_addr = id(wifi_mac_address).state;
-
-            // Remove all colons from the MAC address
-            mac_addr.erase(std::remove(mac_addr.begin(), mac_addr.end(), ':'), mac_addr.end());
-
-            id(ota_url) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.bin";
-            id(ota_urlmd5) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.md5";
-            ESP_LOGD("calypso-mqtt", "OTA base url updated to: %s", id(ota_url).c_str());
-          }
       - lambda: |-
           // Check to see if it has been too long since we reported any data.  If so, reboot the ESP
           if( id(disconnect_time) == 0 )
@@ -235,6 +259,18 @@ interval:
                                         "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"};
             int index = (int) round(id(calypso_wind_angle).state / 22.5) % 16;
             std::string wind_direction_text = directions[index];
+
+            //            int seconds = id(uptime_id).state;
+            //            int days = seconds / 86400;
+            //            seconds = seconds % 86400;
+            //            int hours = seconds / 3600;
+            //            seconds = seconds % 3600;
+            //            int minutes = seconds / 60;
+            //            seconds = seconds % 60;
+            //            char buffer_uptime[15];   // ddd hh:mm:ss
+            //            if( days > 9999 ) days = 9999;    
+            //            // Output dddd HH:MM:ss
+            //            sprintf( buffer_uptime, "%d %02d:%02d:%02d", days, hours, minutes, seconds );
             if( id( extended_data ) )
             {
               return "{"
@@ -267,6 +303,7 @@ interval:
                         "\"value\": " + to_string(id(calypso_roll).state) + ", "
                         "\"units\": \"°\""
                     "}, "
+                    "\"uptime\": \"" + to_string(id(uptime_id).state) + "\", "
                     "\"timestamp\": \"" + std::string(buffer_now) + "\", "  // Fixed comma and quote here
                     "\"boottime\": \"" + std::string(buffer_boot) + "\""
                     "}";
@@ -291,6 +328,7 @@ interval:
                       "\"value\": " + to_string(id(calypso_battery_level).state) + ", "
                       "\"units\": \"%\""
                   "}, "
+                  "\"uptime\": \"" + to_string(id(uptime_id).state) + "\", "
                   "\"timestamp\": \"" + std::string(buffer_now) + "\", "  // Fixed comma and quote here
                   "\"boottime\": \"" + std::string(buffer_boot) + "\""
                   "}";
@@ -302,16 +340,6 @@ interval:
       - lambda: |-
           ESP_LOGI("calypso-mqtt", "Boot time: %d, boot count: %d, update count: %d", id(boot_time), id(reboot_count), id(firmware_update_count) );
           //ESP_LOGI("calypso-mqtt", "OTA URL: %s", id(ota_url).c_str());
-
-      - mqtt.publish:
-          topic: "${vessel_prefix}/electrical/batteries/wind_sensor/ultrasonic/level"
-          payload: !lambda |-
-            return( to_string(id(calypso_battery_level).state));
-
-      - mqtt.publish:
-          topic: "${vessel_prefix}/environment/outside/temperature/ultrasonic"
-          payload: !lambda |-
-            return( to_string(id(calypso_temperature).state));
 
       - mqtt.publish:
           topic: "${vessel_prefix}/electrical/rssi/wind_sensor/ultrasonic"
@@ -407,8 +435,17 @@ script:
           id(disconnect_time) = 0;
       - ble_client.connect: calypso_wind_sensor
 
+binary_sensor:
+  - platform: status
+    name: "WiFi Connected"
+    id: wifi_status
+
 
 sensor:
+  - platform: uptime
+    type: seconds
+    id: uptime_id
+
   - platform: ble_client
     ble_client_id: calypso_wind_sensor
     internal: true  # Hide from Home Assistant
@@ -433,7 +470,9 @@ sensor:
       // Convert raw wind speed to float m/s, then to knots per hour
       float wind_speed = ( wind_speed_raw / 100.0 ) * 1.943844492;
       float wind_angle = wind_angle_raw * 1.0;
-      float compass = 360.0 - compass_raw;
+      int compass = compass_raw % 360;
+      if( compass < 0 ) compass += 360;
+
       int batteryLevel = x[4] * 10;
       ESP_LOGD("wind_sensor", "Received raw data: %u %d %d", wind_speed_raw, wind_angle_raw, compass_raw);  // Log the received value
       id(calypso_wind_speed_raw).publish_state(wind_speed);  // Update the sensor state in Home Assistant
@@ -448,8 +487,9 @@ sensor:
       }
 
       // Do the extended data check
-      if( id( extended_data ) && batteryLevel < 90 )
+      if( id( extended_data ) && batteryLevel < id( extended_data_min_battery ) )
       {
+        // Switch to basic data
         auto *client = id(calypso_wind_sensor);
         auto characteristic = client->get_characteristic(0x180D, 0xA003);
         // Shift to basic data
@@ -457,8 +497,9 @@ sensor:
         characteristic->write_value(&value, 1);
         id( extended_data ) = 0;
       }
-      else if( !id( extended_data ) && batteryLevel >= 90 )
+      else if( !id( extended_data ) && batteryLevel >= id( extended_data_min_battery ) )
       {
+        // Switch to extended_data
         auto *client = id(calypso_wind_sensor);
         auto characteristic = client->get_characteristic(0x180D, 0xA003);
         // Shift to extended data
@@ -493,7 +534,7 @@ sensor:
     id: calypso_wind_angle
     name: "Calypso Wind Angle"
     unit_of_measurement: "°"
-    internal: true  # Hide from Home Assistant
+    internal: false
     accuracy_decimals: 0
     icon: "mdi:compass"
     update_interval: ${calypso_update_interval}
@@ -511,19 +552,20 @@ sensor:
     id: calypso_compass_direction
     name: calypso_heading
     unit_of_measurement: "°"
-    internal: true  # Hide from Home Assistant
+    internal: false
+    # This gets initialized to zero in on_boot
 
   - platform: template
     id: calypso_roll
     name: calypso_roll
     unit_of_measurement: "°"
-    internal: true  # Hide from Home Assistant
+    internal: false
 
   - platform: template
     id: calypso_pitch
     name: calypso_pitch
     unit_of_measurement: "°"
-    internal: true  # Hide from Home Assistant
+    internal: false
 
   - platform: template
     id: calypso_wind_speed_raw
@@ -535,7 +577,7 @@ sensor:
     id: calypso_wind_speed
     name: "Calypso Wind Speed"
     unit_of_measurement: "kts"
-    internal: true  # Hide from Home Assistant
+    internal: false
     accuracy_decimals: 1
     icon: "mdi:weather-windy"
     update_interval: ${calypso_update_interval}
@@ -553,7 +595,7 @@ sensor:
     id: calypso_battery_level
     name: "Calypso Battery Level"
     unit_of_measurement: "%"
-    internal: true  # Hide from Home Assistant
+    internal: false
     accuracy_decimals: 0
     update_interval: ${calypso_update_interval}
 
@@ -561,7 +603,7 @@ sensor:
     id: calypso_temperature
     name: "Calypso Temperature"
     unit_of_measurement: "C"
-    internal: true  # Hide from Home Assistant
+    internal: false
     accuracy_decimals: 0
     update_interval: ${calypso_update_interval}
 
@@ -604,21 +646,20 @@ text_sensor:
   - platform: template
     id: firmware_url
     name: "Firmware URL"
-  - platform: template
-    id: firmware_urlmd5
-    name: "Firmware URL MD5"
 
   - platform: version
     name: "ESPHome Version"
 
   - platform: template
-    name: "Update URL"
-    id: update_url
-
-  - platform: template
     name: "Boot Time"
     id: sntp_boot_time
     update_interval: never  # This is determined elsewhere
+
+  - platform: template
+    name: "Firmware Timestamp"
+    id: compile_time
+    lambda: |-
+      return std::string(__DATE__) + " " + std::string(__TIME__);
 
   - platform: template
     name: "Calypso Wind Direction Text"
@@ -642,6 +683,7 @@ time:
      - 2.pool.ntp.org
     on_time_sync:
       then:
+        - logger.log: "SNTP on_time_sync"
         - text_sensor.template.publish:
             id: sntp_boot_time
             state: !lambda |-
