@@ -80,6 +80,8 @@ wifi:
     password: !secret device_wifi_password
   id: wifi_component
 
+captive_portal:
+
 substitutions:
   device_name: "calypso-mqtt"
   mqtt_interval: "15000"
@@ -203,9 +205,6 @@ mqtt:
       - logger.log:
           format: "MQTT connected..."
           level: INFO
-
-
-captive_portal:
 
 switch:
   - platform: restart
