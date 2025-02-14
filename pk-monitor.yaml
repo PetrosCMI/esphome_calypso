@@ -1,0 +1,519 @@
+esp32:
+  board: seeed_xiao_esp32c3
+  variant: esp32c3
+  framework:
+    type: esp-idf
+
+esphome:
+  name: pk-monitor
+  friendly_name: PKMonitor
+  platformio_options: 
+    board_build.flash_mode: dio
+
+  on_boot:
+    priority: -100  # Ensure it runs after initial setup
+    then:
+      - logger.log: { format: "on_boot: Checking Wi-Fi connection...", level: INFO }
+      - while:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - logger.log: { format: "on_boot: Waiting for Wi-Fi connection...", level: INFO }
+            - lambda: |-
+                ESP_LOGI("on_boot", "WIFI connection state: %d", id(wifi_status).state );
+            - delay: 1s  # Retry every 1 second if not connected
+      - lambda: |-
+          #include <esp_netif.h>
+          esp_netif_dns_info_t dns_info;
+          // Fetch primary DNS
+          esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_MAIN, &dns_info);
+          ESP_LOGI("on_boot", "DNS 1: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
+
+          // Fetch backup DNS (if available)
+          esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_BACKUP, &dns_info);
+          ESP_LOGI("on_boot", "DNS 2: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
+
+      - logger.log: { format: "on_boot: Setting up URLs...", level: INFO }
+      - lambda: |-
+          id(ota_url) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.bin";
+          id( firmware_url ).state = id( ota_url );
+          id(ota_urlmd5) = std::string("${ota_url_base}") + std::string("${device_name}") + ".ota.md5";
+          ESP_LOGI("on_boot", "OTA base url updated to: %s", id(ota_url).c_str());
+
+      - logger.log: { format: "on_boot: Enabling MQTT...", level: INFO }
+      - mqtt.enable:    # manually enable mqtt after wifi
+      - logger.log: { format: "on_boot: Complete.", level: INFO }
+
+# Enable logging
+logger:
+  level: INFO
+ 
+wifi: 
+  networks:
+    - ssid: !secret pbphone_ssid
+      password: !secret pbphone_password
+    - ssid: !secret cmi_wifi_ssid
+      password: !secret cmi_wifi_password
+    - ssid: !secret pd_ssid
+      password: !secret pd_password
+    - ssid: !secret silva_ssid
+      password: !secret silva_password
+  fast_connect: false    # allow scanning for all networks
+  reboot_timeout: 15min  # Reboot the device if Wi-Fi fails to connect within 15 minutes
+  #power_save_mode: none  # Optional: Optimize Wi-Fi performance for reconnection NOT COMPATIBLE with ble
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "PK-monitor Fallback Hotspot"
+    password: !secret device_wifi_password
+  id: wifi_id
+
+captive_portal:
+
+substitutions:
+  device_name: "pk-monitor"
+  ota_url_base: !secret ota_baseurl
+  vessel_prefix: "vessel/TirNaNogIII"
+  minNumSamples: '15'
+  sliding_window_size: '10'     # for sliding or other types of window filters
+  environment_interval: "15s"
+  mqtt_interval: "15s"
+
+globals:
+  - id: mqtt_broker
+    type: std::string
+    restore_value: no
+    initial_value: ""
+  - id: ota_url
+    type: std::string
+    restore_value: no
+    initial_value: ""
+    #initial_value: "https://foo.com/foo.bin"
+  - id: ota_urlmd5
+    type: std::string
+    restore_value: no
+    initial_value: ""
+    #initial_value: "https://foo.com/foo.md5"
+  - id: reboot_count
+    type: int
+    restore_value: yes   # Ensures the value is saved between reboots
+    initial_value: '0'
+  - id: firmware_update_count
+    type: int
+    restore_value: yes   # Ensures the value is saved between reboots
+    initial_value: '0'
+  - id: max_voltage
+    type: float
+    initial_value: "0.0"
+  - id: max_current
+    type: float
+    initial_value: "0.0"
+
+# No API here ... it interferes with MQTT ... see https://esphome.io/components/mqtt.html
+
+http_request:
+  verify_ssl: false  # Set to true if your server has a valid SSL certificate
+
+ota:
+  - platform: http_request
+#    on_state_change:
+#      - logger.log: "OTA state change..."
+
+# This is so we can host data requests
+web_server:
+  port: 80
+
+
+mqtt:
+  broker: !secret mqtt_broker
+  id: mqtt_client
+  port: 8883
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  enable_on_boot: false
+  discovery: false  # Disable Home Assistant discovery if not needed
+  topic_prefix: "${vessel_prefix}/${device_name}"  # base 
+  clean_session: true  # Ensure this is set to true
+#  skip_cert_cn_check: true
+#  idf_send_async: false
+
+  certificate_authority: !secret mqtt_ca_certificate
+  client_certificate: !secret mqtt_client_certificate
+  client_certificate_key: !secret mqtt_client_certificate_key
+
+  birth_message:
+    topic: "${device_name}/status"
+    payload: online
+  will_message:
+    topic: "${device_name}/status"
+    payload: offline
+  on_message:
+    - topic: "esphome/device/ota/${device_name}"
+      qos: 0
+      then:
+        - logger.log: "Trying to flash from id(ota_url)"
+        - lambda: |-
+            id(firmware_update_count) += 1;
+        - ota.http_request.flash:
+            md5_url: !lambda 'return id(ota_urlmd5);'
+            url: !lambda 'return id(ota_url);'
+        - logger.log: "This message should not be displayed because the device reboots"
+
+    - topic: "esphome/device/reboot/${device_name}"
+      qos: 0
+      then:
+        - logger.log: "Rebooting"
+        - delay: 2s
+        - switch.turn_on: restart_switch
+        - logger.log: "This message should not be displayed because the device reboots"
+
+  reboot_timeout: 15min  # Reboot the device if Wi-Fi fails to connect within 15 minutes
+  on_connect: 
+    then:
+      - logger.log:
+          format: "MQTT connected..."
+          level: INFO
+
+i2c:
+  sda: GPIO6
+  scl: GPIO7
+  scan: true
+
+font:
+  - file: "gfonts://Roboto"
+    id: roboto_font
+    size: 20
+
+binary_sensor:
+  - platform: status
+    name: "WiFi Connected"
+    id: wifi_status
+
+sensor:
+  - platform: uptime
+    type: seconds
+    id: uptime_id
+    internal: false  
+
+  - platform: bme280_i2c
+    address: 0x76
+    update_interval: ${environment_interval}
+
+    temperature:
+      name: "BME280 Temperature"
+      id: bme280_temperature
+      internal: false  
+      accuracy_decimals: 1
+      oversampling: 16x
+
+    humidity:
+      name: "BME280 Humidity"
+      id: bme280_humidity
+      internal: false  
+      accuracy_decimals: 1
+      oversampling: 16x
+
+    pressure:
+      name: "BME280 Pressure"
+      id: barometric_pressure
+      internal: false  
+      unit_of_measurement: "hPa"
+      accuracy_decimals: 1
+      filters:
+        - sliding_window_moving_average:
+            window_size: ${sliding_window_size}  # Average over 10 readings
+            send_every: 1    # Send every reading    
+
+  - platform: template
+    name: "BME280 DewPoint"
+    id: bme280_dewpoint
+    internal: false  
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    lambda: |-
+      const float a = 17.27;
+      const float b = 237.7;
+      float T = id(bme280_temperature).state;
+      float RH = id(bme280_humidity).state;
+      float alpha = (a * T) / (b + T) + log(RH / 100.0);
+      return (b * alpha) / (a - alpha);
+
+  - platform: template
+    id: pressure_change_1hr       # updated by delta calcs
+    name: "Pressure Change  1hr"
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 2
+    update_interval: ${environment_interval}
+
+  - platform: template
+    id: pressure_change_3hr
+    name: "Pressure Change  3hr"
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 2
+    update_interval: ${environment_interval}
+
+  - platform: template
+    id: pressure_change_6hr
+    name: "Pressure Change 6hr"
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 1
+    update_interval: ${environment_interval}
+
+  - platform: template
+    id: pressure_change_12hr
+    name: "Pressure Change 12hr"
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 1
+    update_interval: ${environment_interval}
+
+  # Output sensor for storm level
+  - platform: template
+    id: storm_level
+    name: "Storm Level"
+    unit_of_measurement: ""
+    icon: "mdi:weather-lightning"
+    accuracy_decimals: 0
+    update_interval: ${environment_interval}
+
+  - platform: ina226
+    address: 0x40
+    shunt_resistance: 0.01 ohm
+    max_current: 10A
+    update_interval: 100ms  # Fast sampling rate
+    adc_time: 140us
+    adc_averaging: 128
+    current:
+      name: "DC Current"
+      filters:
+        - sliding_window_moving_average:
+            window_size: 50  # 5 seconds of data at 100ms intervals
+        - lambda: |-
+            if (x > id(max_current)) {
+              id(max_current) = x;
+            }
+            return x;
+    power:
+      name: "DC Power"
+      filters:
+        - sliding_window_moving_average:
+            window_size: 50
+    bus_voltage:
+      name: "DC Voltage"
+      filters:
+        - sliding_window_moving_average:
+            window_size: 50
+        - lambda: |-
+            if (x > id(max_voltage)) {
+              id(max_voltage) = x;
+            }
+            return x;
+    shunt_voltage:
+      name: "INA226 Shunt Voltage"
+      filters:
+        - sliding_window_moving_average:
+            window_size: 50
+
+  - platform: template
+    name: "Max DC Voltage"
+    lambda: |-
+      return id(max_voltage);
+    update_interval: 5s
+    unit_of_measurement: "V"  # Set the unit for voltage
+    accuracy_decimals: 2       # Set the number of decimal points to 2
+    on_value:
+      then:
+        # Reset max_voltage after sending value to HA
+        - lambda: |-
+            id(max_voltage) = 0.0;  
+
+  - platform: template
+    name: "Max DC Current"
+    lambda: |-
+      return id(max_current);
+    update_interval: 5s
+    unit_of_measurement: "A"  # Set the unit for current
+    accuracy_decimals: 2       # Set the number of decimal points to 2
+    on_value:
+      then:
+        # Reset max_current after sending value to HA
+        - lambda: |-
+            id(max_current) = 0.0;  
+
+switch:
+  - platform: restart
+    name: "Restart ESP32"
+    id: restart_switch
+
+# Automation to publish the specific data to MQTT every 15 seconds
+interval:
+  - interval: ${mqtt_interval}
+    then: 
+      - mqtt.publish: 
+          topic: ${vessel_prefix}/${device_name}/uptime
+          payload: !lambda |-
+            char buffer[64];
+            time_t uptime = id(uptime_id).state;
+            strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", localtime(&uptime));
+            return std::string(buffer);
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/temperature"
+          payload: !lambda |-
+            return( to_string(id(bme280_temperature).state));
+
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/humidity"
+          payload: !lambda |-
+            return( to_string(id(bme280_humidity).state));
+
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/pressure"
+          payload: !lambda |-
+            return( to_string(id(barometric_pressure).state));
+
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/pressure/delta1hr"
+          payload: !lambda |-
+            return( to_string(id(pressure_change_1hr).state));
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/pressure/delta3hr"
+          payload: !lambda |-
+            return( to_string(id(pressure_change_3hr).state));
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/pressure/delta6hr"
+          payload: !lambda |-
+            return( to_string(id(pressure_change_6hr).state));
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/pressure/delta12hr"
+          payload: !lambda |-
+            return( to_string(id(pressure_change_12hr).state));
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/pressure/stormlevel"
+          payload: !lambda |-
+            return( to_string(id(storm_level).state));
+
+      - mqtt.publish:
+          topic: "${vessel_prefix}/environment/dewpoint"
+          payload: !lambda |-
+            return( to_string(id(bme280_dewpoint).state));
+
+  - interval: 60s
+    then:
+      - logger.log:
+          format: "pk-monitor: 60s interval"
+      - lambda: |-
+          ESP_LOGI("pk-monitor", "Uptime: %d, boot count: %d, update count: %d", id(uptime_id), id(reboot_count), id(firmware_update_count) );
+          ESP_LOGD("pk-monitor", "OTA URL: %s", id(ota_url).c_str());
+
+  - interval: 1min  # Compute delta readings every minute
+    then:
+      - lambda: |-
+          if( isnan( id(barometric_pressure).state ) ) return;   // no data yet
+
+          ESP_LOGI("interval_debug", "Interval block triggered.");
+          const size_t buffer_size = 720;  // 12 hours × 60 minutes
+          static float pressure_buffer[buffer_size] = {0};
+          static uint32_t time_buffer[buffer_size] = {0};
+          static size_t current_index = 0;
+          static bool initialized = false;
+          static float initial_pressure = 0.0;
+
+          uint32_t current_time = id(sntp_time).now().timestamp;
+          float current_pressure = id(barometric_pressure).state;
+
+          // Check if this is the first reading and initialize buffers if needed
+          if (!initialized) {
+            initial_pressure = current_pressure;
+            for (size_t i = 0; i < buffer_size; ++i) {
+              pressure_buffer[i] = initial_pressure;
+              time_buffer[i] = current_time;
+            }
+            initialized = true;
+            ESP_LOGI("pressure_init", "Initialized buffers with initial pressure: %.2f at time: %u", initial_pressure, current_time);
+          }
+
+          // Store the current pressure and timestamp in the circular buffer
+          pressure_buffer[current_index] = current_pressure;
+          time_buffer[current_index] = current_time;
+
+          // Move to the next index (wrap around at the buffer's end)
+          current_index = (current_index + 1) % buffer_size;
+
+          // Compute deltas for 1, 3, 6, and 12 hours
+          auto compute_delta = [&](int hours) -> float {
+            size_t delta_index = (current_index + buffer_size - (hours * 60)) % buffer_size;
+            //if (time_buffer[delta_index] != 0 && current_time - time_buffer[delta_index] >= hours * 3600) {
+              return current_pressure - pressure_buffer[delta_index];
+            //} else {
+            //  return NAN;  // Not enough data yet
+            //}
+          };
+
+          float delta_1hr = compute_delta(1);
+          float delta_3hr = compute_delta(3);
+          float delta_6hr = compute_delta(6);
+          float delta_12hr = compute_delta(12);
+
+          // Log the deltas
+          ESP_LOGD("pressure_delta", "1hr: %.2f, 3hr: %.2f, 6hr: %.2f, 12hr: %.2f",
+                  delta_1hr, delta_3hr, delta_6hr, delta_12hr);
+
+          // Publish the deltas
+          id(pressure_change_1hr).publish_state(delta_1hr);
+          id(pressure_change_3hr).publish_state(delta_3hr);
+          id(pressure_change_6hr).publish_state(delta_6hr);
+          id(pressure_change_12hr).publish_state(delta_12hr);
+          ESP_LOGI("deltaPInterval", "%u: deltaP for now, 1,3,6,12hr: %.1f, %.1f, %.1f, %.1f, %.1f",
+                  current_time, current_pressure, delta_1hr, delta_3hr, delta_6hr, delta_12hr);
+
+          // Now compute the storm level
+          // Weighting factors for pressure change over intervals
+          const float weight_1hr = 4.0;   // Highest priority for 1-hour
+          const float weight_3hr = 3.0;
+          const float weight_6hr = 2.0;
+          const float weight_12hr = 1.0;
+
+          // Thresholds for each interval
+          const float threshold_1hr = -2.0;  // hPa
+          const float threshold_3hr = -4.0;  // hPa
+          const float threshold_6hr = -6.0;  // hPa
+          const float threshold_12hr = -8.0; // hPa
+
+          // Compute scores for each interval
+          float score_1hr = (delta_1hr <= threshold_1hr) ? weight_1hr * abs(delta_1hr) / abs(threshold_1hr) : 0.0;
+          float score_3hr = (delta_3hr <= threshold_3hr) ? weight_3hr * abs(delta_3hr) / abs(threshold_3hr) : 0.0;
+          float score_6hr = (delta_6hr <= threshold_6hr) ? weight_6hr * abs(delta_6hr) / abs(threshold_6hr) : 0.0;
+          float score_12hr = (delta_12hr <= threshold_12hr) ? weight_12hr * abs(delta_12hr) / abs(threshold_12hr) : 0.0;
+
+          // Calculate total storm level (clamped to a max of 10)
+          float level = score_1hr + score_3hr + score_6hr + score_12hr;
+          // Publish the storm level
+          id(storm_level).publish_state( fmin(level, 10.0) );  // Clamp to 10 (extreme warning)
+
+
+text_sensor:
+  - platform: wifi_info
+    mac_address:
+      id: wifi_mac_address
+      name: ESP Mac Wifi Address
+
+  - platform: template
+    id: firmware_url
+    name: "Firmware URL"
+
+  - platform: version
+    name: "ESPHome Version"
+
+  - platform: template
+    name: "Firmware Timestamp"
+    id: compile_time
+    lambda: |-
+      return std::string(__DATE__) + " " + std::string(__TIME__);
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/Vancouver
+    servers:
+     - 0.pool.ntp.org
+     - 1.pool.ntp.org
+     - 2.pool.ntp.org
