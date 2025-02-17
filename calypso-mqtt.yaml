@@ -1,3 +1,8 @@
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
 esphome:
   name: calypso-mqtt
   friendly_name: Calypso_mqtt
@@ -7,21 +12,6 @@ esphome:
   on_boot:
     priority: -100  # Ensure it runs after initial setup
     then:
-      - lambda: |-
-          #include <esp_netif.h>
-          esp_netif_dns_info_t dns_info;
-          // Fetch primary DNS
-          esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_MAIN, &dns_info);
-          ESP_LOGI("on_boot", "DNS 1: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
-
-          // Fetch backup DNS (if available)
-          esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_BACKUP, &dns_info);
-          ESP_LOGI("on_boot", "DNS 2: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
-
-      - delay: 5s
-      - lambda: |-
-          ESP_LOGI("on_boot", "WiFi Status: %d", id(wifi_status).state);
-      - logger.log: { format: "Initial...", level: INFO }
       - lambda: |-
           id( calypso_compass_direction ) = 0;
           id( calypso_pitch ) = 0;
@@ -43,6 +33,17 @@ esphome:
                 ESP_LOGI("on_boot", "WIFI connection state: %d", id(wifi_status).state );
             - delay: 1s  # Retry every 1 second if not connected
       - logger.log: { format: "on_boot: Wi-Fi connected, enabling MQTT...", level: INFO }
+      - lambda: |-
+          #include <esp_netif.h>
+          esp_netif_dns_info_t dns_info;
+          // Fetch primary DNS
+          esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_MAIN, &dns_info);
+          ESP_LOGI("on_boot", "DNS 1: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
+
+          // Fetch backup DNS (if available)
+          esp_netif_get_dns_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), ESP_NETIF_DNS_BACKUP, &dns_info);
+          ESP_LOGI("on_boot", "DNS 2: %s", ip4addr_ntoa(reinterpret_cast<ip4_addr_t*>(&dns_info.ip.u_addr.ip4)));
+      - delay: 1s
       - mqtt.enable:    # manually enable mqtt after wifi
       - delay: 5s  # Wait for everything else before trying BLE
       - logger.log: { format: "Enabling BLE...", level: INFO }
@@ -50,11 +51,6 @@ esphome:
           auto *client = id(calypso_wind_sensor);
           client->set_auto_connect(true);  // Enable auto-connect
       - ble_client.connect: calypso_wind_sensor
-
-esp32:
-  board: esp32-c3-devkitm-1
-  framework:
-    type: esp-idf
 
 # Enable logging
 logger:
@@ -133,14 +129,14 @@ globals:
     type: int
     restore_value: False
     initial_value: '50'   # global const
-  - id: extended_data
-    type: int
-    restore_value: False
-    initial_value: '0'
   - id: extended_data_min_battery
     type: int
     restore_value: False
     initial_value: '80'
+  - id: extended_data
+    type: int
+    restore_value: False
+    initial_value: '0'
 
 # No API here ... it interferes with MQTT ... see https://esphome.io/components/mqtt.html
 
@@ -155,6 +151,8 @@ ota:
 # This is so we can host data requests
 web_server:
   port: 80
+  include_internal: true
+  local: true     # allow this to work w/o internet access
 
 
 mqtt:
@@ -169,6 +167,7 @@ mqtt:
   clean_session: true  # Ensure this is set to true
 #  skip_cert_cn_check: true
 #  idf_send_async: false
+  log_topic: null  # Prevents MQTT log messages from consuming RAM
 
   certificate_authority: !secret mqtt_ca_certificate
   client_certificate: !secret mqtt_client_certificate
@@ -214,6 +213,11 @@ switch:
 
 # Automation to publish the specific data to MQTT every 15 seconds
 interval:
+  - interval: 30s
+    then:
+      - lambda: |-
+          ESP_LOGI("heap", "Free heap: %u", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+
   - interval: 60s
     then:
       - lambda: |-
@@ -347,20 +351,20 @@ interval:
 
 esp32_ble_tracker:
   on_ble_advertise:
-    - mac_address: ${calypso_mac_addr}
-      then:
-        - lambda: |-
-            int rssi = x.get_rssi();
-            id(ble_client_rssi).publish_state(rssi);
+  - mac_address: ${calypso_mac_addr}
+    then:
+      - lambda: |-
+          int rssi = x.get_rssi();
+          id(ble_client_rssi).publish_state(rssi);
 
 ble_client:
   - mac_address: ${calypso_mac_addr}
     id: calypso_wind_sensor
     auto_connect: false
-    on_passkey_request:
-      then:
-        - logger.log:
-            format: "Got on_passkey_request from BLE device"
+    # on_passkey_request:
+    #   then:
+    #     - logger.log:
+    #         format: "Got on_passkey_request from BLE device"
 
     on_connect:
       then:
@@ -533,7 +537,7 @@ sensor:
     id: calypso_wind_angle
     name: "Calypso Wind Angle"
     unit_of_measurement: "°"
-    internal: false
+    internal: true
     accuracy_decimals: 0
     icon: "mdi:compass"
     update_interval: ${calypso_update_interval}
@@ -551,20 +555,20 @@ sensor:
     id: calypso_compass_direction
     name: calypso_heading
     unit_of_measurement: "°"
-    internal: false
+    internal: true
     # This gets initialized to zero in on_boot
 
   - platform: template
     id: calypso_roll
     name: calypso_roll
     unit_of_measurement: "°"
-    internal: false
+    internal: true
 
   - platform: template
     id: calypso_pitch
     name: calypso_pitch
     unit_of_measurement: "°"
-    internal: false
+    internal: true
 
   - platform: template
     id: calypso_wind_speed_raw
@@ -576,7 +580,7 @@ sensor:
     id: calypso_wind_speed
     name: "Calypso Wind Speed"
     unit_of_measurement: "kts"
-    internal: false
+    internal: true
     accuracy_decimals: 1
     icon: "mdi:weather-windy"
     update_interval: ${calypso_update_interval}
@@ -589,12 +593,22 @@ sensor:
       - max:
           window_size: ${window_size}
           send_every: 1
+  - platform: template
+    id: max_wind_speed
+    name: "Max Wind Speed Last Hour"
+    unit_of_measurement: "kts"
+    update_interval: 1s  # Adjust based on how often your wind sensor updates
+    lambda: |-
+      return id(calypso_wind_speed).state;
+    filters:
+      - max:
+          window_size: 3600  # If wind_speed updates every 10s, this keeps 1 hour of data
 
   - platform: template
     id: calypso_battery_level
     name: "Calypso Battery Level"
     unit_of_measurement: "%"
-    internal: false
+    internal: true
     accuracy_decimals: 0
     update_interval: ${calypso_update_interval}
 
@@ -602,7 +616,7 @@ sensor:
     id: calypso_temperature
     name: "Calypso Temperature"
     unit_of_measurement: "C"
-    internal: false
+    internal: true
     accuracy_decimals: 0
     update_interval: ${calypso_update_interval}
 
@@ -610,20 +624,20 @@ sensor:
   - platform: template
     name: "Calypso RSSI"
     id: ble_client_rssi
-    internal: false
+    internal: true
     unit_of_measurement: "dB"
     accuracy_decimals: 0
 
   - platform: template
     name: "Calypso Connection State"
     id: calypso_connection
-    internal: false
+    internal: true
     accuracy_decimals: 0
 
   - platform: template
     name: "Disconnect Time (min)"
     id: incrementing_counter
-    internal: false
+    internal: true
     accuracy_decimals: 0
     unit_of_measurement: "min"
     update_interval: 60s
